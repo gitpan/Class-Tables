@@ -16,12 +16,12 @@ This module requires these other modules and libraries:
 
    Carp
    DBI
-   DBD::mysql or DBD::SQLite
+   DBD::mysql, DBD::SQLite, or DBD::Pg
    Lingua::EN::Inflect
 
 COPYRIGHT AND LICENCE
 
-Copyright (C) 2003 Mike Rosulek <mike@mikero.com>
+Copyright (C) 2004 Mike Rosulek <mike@mikero.com>
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself. 

@@ -14,8 +14,21 @@ use DBI;
 ############################
 
 my %drivers = (
-    mysql  => "show tables",
-    SQLite => "select name from sqlite_master where type='table'"
+    mysql  => {
+        show => "show tables",
+        pkey => "int primary key not null auto_increment",
+        blob => "blob"
+    },
+    SQLite => {
+        show => "select name from sqlite_master where type='table'",
+        pkey => "integer primary key",
+        blob => "blob"
+    },
+    Pg => {
+        show => "select tablename from pg_tables where schemaname='public'",
+        pkey => "serial primary key",
+        blob => "bytea"
+    }
 );
 
 use lib 'testconfig';
@@ -25,98 +38,163 @@ eval q[
     $Config = Class::Tables::TestConfig->Config;
 ];
 
-######################
-## import test data ##
-######################
+###################
+## DB connection ##
+###################
 
-my $dbh = DBI->connect( @$Config{qw/dsn user password/} );
+if ($Config->{dsn} =~ /^skip$/i) {
+    plan skip_all => "User has skipped the test suite.\n"
+                   . "Run `perl Makefile.PL -s` to reconfigure the connection "
+                   . "parameters\nfor the test database.";
+}
+
+my $dbh = eval {
+    DBI->connect( @$Config{qw/dsn user password/}, 
+                  { RaiseError => 0, PrintError => 0 } )
+};
 
 if (not $dbh) {
     plan skip_all => "Couldn't connect to the database for testing.\n"
-                   . "Run `perl Makefile.PL -s` to configure the test DB.";
-                   
+                   . "Run `perl Makefile.PL -s` to reconfigure the connection "
+                   . "parameters\nfor the test database.";
+
 } elsif ( ! $drivers{ $dbh->{Driver}{Name} } ) {
     $dbh->disconnect;
     plan skip_all => "Your database driver is not supported. (supported: "
-                   . join(" " => sort keys %drivers) . ")";
+                   . join(" " => sort keys %drivers) . ")\n"
+                   . "Run `perl Makefile.PL -s` to reconfigure the connection "
+                   . "parameters\nfor the test database.";
 
 } else {
-    plan tests => 46;
+    plan tests => 67;
+    print "# Starting test suite. Run `perl Makefile.PL -s` to reconfigure\n"
+            . "# connection parameters for the test database.\n";
 }
 
 ## clear all tables first
 
-my $q = $dbh->prepare( $drivers{ $dbh->{Driver}{Name} } );
+my $driver = $dbh->{Driver}{Name};
+
+my $q = $dbh->prepare( $drivers{$driver}{show} );
 $q->execute;
 while ( my ($table) = $q->fetchrow_array ) {
+    print "DROPPING $table\n";
     $dbh->do("drop table $table");
 }
 $q->finish;
 
-## insert test data
+######################
+## insert test data ##
+######################
 
-$dbh->do($_) for (split /\s*;\s*/, <<'END_OF_SQL');
+my $pkey = $drivers{$driver}{pkey};
+my $blob = $drivers{$driver}{blob};
+
+$dbh->do($_) for (split /\s*;\s*/, <<"END_OF_SQL");
+
     create table departments (
-        id              integer primary key /*! not null auto_increment */,
-        department_name varchar(50) not null
+        id              $pkey,
+        name            varchar(50) not null,
+        ends_with_id    integer
     );
     create table employees (
-        id              integer primary key /*! not null auto_increment */,
+        id              $pkey,
         employee_name   varchar(50) not null unique,
         department_id   integer,
-        photo           longblob
+        employees_photo $blob
     );
     create table purchases (
-        id              integer primary key /*! not null auto_increment */,
-        product_id      integer not null,
-        employee_id     integer not null,
-        quantity        integer not null,
-        date            date
+        purchase_id          $pkey,
+        purchase_product     integer not null,
+        purchase_employee_id integer not null,
+        purchase_quantity    integer not null,
+        purchases_date       date,
+        purchase_foo_id      integer
     );
     create table products (
-        id              integer primary key /*! not null auto_increment */,
+        id              $pkey,
         name            varchar(50) not null,
         weight          integer not null,
         price           decimal
     );
-    insert into departments values (1,'Hobbiton Division');
-    insert into departments values (2,'Bree Division');
-    insert into departments values (3,'Buckland Division');
-    insert into departments values (4,'Michel Delving Division');
     
-    insert into employees   values (1,'Frodo Baggins',3,'');
-    insert into employees   values (2,'Bilbo Baggins',3,'');
-    insert into employees   values (3,'Samwise Gamgee',3,'');
-    insert into employees   values (4,'Perigrin Took',2,'');
-    insert into employees   values (5,'Fredegar Bolger',2,'');
-    insert into employees   values (6,'Meriadoc Brandybuck',2,'');
-    insert into employees   values (7,'Lotho Sackville-Baggins',4,'');
-    insert into employees   values (8,'Ted Sandyman',4,'');
-    insert into employees   values (9,'Will Whitfoot',4,'');
-    insert into employees   values (10,'Bandobras Took',1,'');
-    insert into employees   values (11,'Folco Boffin',1,'');
+    insert into departments (name,ends_with_id)
+        values ('Hobbiton Division',0);
+    insert into departments (name,ends_with_id)
+        values ('Bree Division',0);
+    insert into departments (name,ends_with_id)
+        values ('Buckland Division',0);
+    insert into departments (name,ends_with_id)
+        values ('Michel Delving Division',0);
     
-    insert into products    values (1,'Southfarthing Pipeweed',10,200);
-    insert into products    values (2,'Prancing Pony Ale',150,300);
-    insert into products    values (3,'Farmer Cotton Mushrooms',200,150);
-    insert into products    values (4,'Green Dragon Ale',150,350);
+    insert into employees (employee_name,department_id)
+        values ('Frodo Baggins',3);
+    insert into employees (employee_name,department_id)
+        values ('Bilbo Baggins',3);
+    insert into employees (employee_name,department_id)
+        values ('Samwise Gamgee',3);
+    insert into employees (employee_name,department_id)
+        values ('Perigrin Took',2);
+    insert into employees (employee_name,department_id)
+        values ('Fredegar Bolger',2);
+    insert into employees (employee_name,department_id)
+        values ('Meriadoc Brandybuck',2);
+    insert into employees (employee_name,department_id)
+        values ('Lotho Sackville-Baggins',4);
+    insert into employees (employee_name,department_id)
+        values ('Ted Sandyman',4);
+    insert into employees (employee_name,department_id)
+        values ('Will Whitfoot',4);
+    insert into employees (employee_name,department_id)
+        values ('Bandobras Took',1);
+    insert into employees (employee_name,department_id)
+        values ('Folco Boffin',1);
+        
+    insert into products (name,weight,price)
+        values ('Southfarthing Pipeweed',10,200);
+    insert into products (name,weight,price)
+        values ('Prancing Pony Ale',150,300);
+    insert into products (name,weight,price)
+        values ('Farmer Cotton Mushrooms',200,150);
+    insert into products (name,weight,price)
+        values ('Green Dragon Ale',150,350);
     
-    insert into purchases   values (1,2,6,6,'2002-12-10');
-    insert into purchases   values (2,4,3,1,'2002-12-10');
-    insert into purchases   values (3,1,2,20,'2002-12-09');
-    insert into purchases   values (4,3,4,8,'2002-12-11');
-    insert into purchases   values (5,1,1,1,'2002-12-13');
-    insert into purchases   values (6,3,1,2,'2002-12-15');
-    insert into purchases   values (7,3,3,3,'2002-12-12');
-    insert into purchases   values (8,3,3,15,'2002-12-08');
-    insert into purchases   values (9,2,6,11,'2002-12-08');
-    insert into purchases   values (10,3,2,8,'2002-12-14')
+    insert into purchases
+        (purchase_product,purchase_employee_id,purchase_quantity,purchases_date)
+        values (2,6,6,'2002-12-10');
+    insert into purchases
+        (purchase_product,purchase_employee_id,purchase_quantity,purchases_date)
+        values (4,3,1,'2002-12-10');
+    insert into purchases
+        (purchase_product,purchase_employee_id,purchase_quantity,purchases_date)
+        values (1,2,20,'2002-12-09');
+    insert into purchases
+        (purchase_product,purchase_employee_id,purchase_quantity,purchases_date)
+        values (3,4,8,'2002-12-11');
+    insert into purchases
+        (purchase_product,purchase_employee_id,purchase_quantity,purchases_date)
+        values (1,1,1,'2002-12-13');
+    insert into purchases
+        (purchase_product,purchase_employee_id,purchase_quantity,purchases_date)
+        values (3,1,2,'2002-12-15');
+    insert into purchases
+        (purchase_product,purchase_employee_id,purchase_quantity,purchases_date)
+        values (3,3,3,'2002-12-12');
+    insert into purchases
+        (purchase_product,purchase_employee_id,purchase_quantity,purchases_date)
+        values (3,3,15,'2002-12-08');
+    insert into purchases
+        (purchase_product,purchase_employee_id,purchase_quantity,purchases_date)
+        values (2,6,11,'2002-12-08');
+    insert into purchases
+        (purchase_product,purchase_employee_id,purchase_quantity,purchases_date)
+        values (3,2,8,'2002-12-14')
 
 END_OF_SQL
 
-################
-## real tests ##
-################
+####################
+## initialization ##
+####################
 
 my $timer = times;
 
@@ -125,7 +203,7 @@ use_ok('Class::Tables');
 {
     package MySubclass;
     our @ISA = ('Class::Tables');
-    our $hello;
+    our $hello = 0;
     sub search {
         my $x = shift;
         $hello++;
@@ -135,28 +213,41 @@ use_ok('Class::Tables');
 
 MySubclass->dbh($dbh);
 
-## subclassing
+# use Data::Dumper;
+# print Dumper \%Class::Tables::CLASS;
 
-for (qw/Departments Employees Products Purchases/) {
+#################
+## subclassing ##
+#################
+
+my @classes = qw/Employees Departments Products Purchases/;
+
+for (@classes) {
     no strict 'refs';
     is_deeply(
         \@{"$_\::ISA"},
         ['MySubclass'],
-        "$_ class created" );
+        "$_ class created w/ proper \@ISA" );
 }
 
-## fetch class method
+########################
+## fetch class method ##
+########################
 
-isa_ok(
-    Employees->fetch(1),
-    "Employees",
-    "fetch result" );
+for (@classes) {
+    isa_ok(
+        $_->fetch(1),
+        $_,
+        "$_->fetch" );
+}
 
 is( Employees->fetch(234332),
     undef,
     "fetch returns undef on failure" );
 
-## search class method
+#########################
+## search class method ##
+#########################
 
 is( Employees->search(id => 1)->id,
     Employees->fetch(1)->id,
@@ -197,7 +288,52 @@ is( Employees->search( name => "Frodo Baggins" )->name,
 ok( scalar Employees->search(department => Departments->fetch(3)),
     "search with object constraint on foreign key" );
 
-## basic object accessors
+########################
+## instance accessors ##
+########################
+
+my %simple_accessors = (
+    Departments => {
+        id           => '',
+        name         => '',
+        ends_with_id => '',
+        employees    => "Employees" # x
+    },
+    Employees => {
+        id           => '',
+        name         => '',
+        department   => "Departments",
+        photo        => '',
+        purchases    => "Purchases" # x
+    },
+    Purchases => {
+        id          => '',
+        product     => "Products",
+        employee    => "Employees",
+        quantity    => '',
+        date        => '',
+        foo_id      => '',
+    },
+    Products => {
+        id          => '',
+        name        => '',
+        weight      => '',
+        price       => '',
+        purchases   => "Purchases" # x
+    }
+);
+
+for my $class (keys %simple_accessors) {
+    my $obj = $class->fetch(1);
+
+    for my $accessor (keys %{ $simple_accessors{$class} }) {
+        is( ref $obj->$accessor,
+            $simple_accessors{$class}{$accessor},
+            "correct $class\->$accessor accessor" );
+    }
+}
+
+####
 
 my $h = Employees->fetch(1);
 
@@ -205,26 +341,20 @@ is( "$h",
     $h->name,
     "objects stringify to name column" );
 
-isa_ok(
-    $h->department,
-    "Departments",
-    "foreign key accessor" );
-
-ok( ! ref $h->name,
-    "normal accessor returns unblessed scalar" );
-
 ok( scalar(() = $h->purchases) > 1,
     "indirect foreign key returns list" );
 
 ok( do { eval { $h->age }; $@ },
     "die on bad accessor name" );
 
+my $old_id = $h->id;
 is( do { eval { $h->id(5) }; $h->id },
-    1,
+    $old_id,
     "id accessor read-only" );
 
+my $new_guy = Employees->fetch(3);
 my $count = $Class::Tables::SQL_QUERIES;
-(undef) = $h->photo;
+(undef) = $new_guy->photo;
 ok( $count < $Class::Tables::SQL_QUERIES,
     "blob accessors lazy-loaded" );
 
@@ -233,7 +363,9 @@ my @p2 = $h->purchases(product => 3);
 ok( @p1 > @p2,
     "additional search constraints in indirect key accessors" );
 
-## basic mutators
+##############################
+## object instance mutators ##
+##############################
 
 my $dept = Departments->fetch(1);
 $h->department($dept);
@@ -265,12 +397,16 @@ is( $h->department,
 
 $h->department($dept);
 
-## this depends on MySQL version, sadly..
-# $h->department("asdfasdf");
-# ok( ref $h->department,                   "gracefully handle bad changes" );
-# $h->department( $dept );
+## 
+#$h->department("asdfasdf");
+#is( $h->department,
+#    $dept,
+#    "gracefully handle invalid keys" );
+#$h->department( $dept );
 
-## concurrency
+#################
+## concurrency ##
+#################
 
 my $p1 = Purchases->fetch(1);
 my $p2 = Purchases->fetch(1);
@@ -281,7 +417,9 @@ is( $p2->quantity,
     $p1->quantity,
     "updates concurrently visible" );
 
-## creating objects
+######################
+## creating objects ##
+######################
 
 is( Employees->new(name => "Samwise Gamgee"),
     undef,
@@ -305,7 +443,9 @@ is( $new->department->id,
     $dept->id,
     "new creates object using object for foreign key" );
 
-## dump method
+##########################
+## dump instance method ##
+##########################
 
 my $dump = $h->dump;
 
@@ -327,7 +467,9 @@ is( $dump->{purchases}[0]{'product.name'},
     ($h->purchases)[0]->product->name,
     "dump output indirect foreign keys inflated" );
 
-## deleting objects
+######################
+## deleting objects ##
+######################
 
 my $id = $new->id;
 $new->delete;
@@ -365,7 +507,9 @@ is( scalar Employees->search,
     undef,
     "delete all in a table" );
 
-## subclassing
+###########################
+## subclassing revisited ##
+###########################
 
 isnt(
     $MySubclass::hello,
@@ -376,13 +520,14 @@ isnt(
 
 $timer = times - $timer;
 ok( 1,
-    "summary: $Class::Tables::SQL_QUERIES queries, ${timer}s "
-  . "(using $dbh->{Driver}{Name})" );
+    "summary: $Class::Tables::SQL_QUERIES queries, ${timer}s ($driver)" );
 
-## cleanup
+#############
+## cleanup ##
+#############
 
 END {
-    if ($dbh) {
+    if ($dbh and $dbh->{Active}) {
         $dbh->do($_) for (split /\s*;\s*/, <<'        END_OF_SQL');
             drop table /*! if exists */ departments;
             drop table /*! if exists */ employees;

@@ -3,8 +3,8 @@ use ExtUtils::MakeMaker;
 use DBI;
 use Data::Dumper;
 
-unless (grep { /^(mysql|SQLite)$/ } DBI->available_drivers) {
-    die "Class::Tables requires DBD::mysql or DBD::SQLite at this time";
+unless (grep { /^(mysql|SQLite|Pg)$/ } DBI->available_drivers) {
+    die "Class::Tables requires DBD::mysql, DBD::SQLite, or DBD::Pg at this time";
 }
 
 use lib 'testconfig';
@@ -33,6 +33,9 @@ if (defined $Config->{dsn} and not $ARGV[0] =~ /^-s(etup)?$/) {
         
         Enter "NONE" (without the quotes) to indicate an empty string
         for a config value.
+
+        Enter "SKIP" (without the quotes) to skip the test suite
+        completely during the build/install process.
     \n];
 
     $Config->{dsn} = 'dbi:mysql:test'
@@ -41,6 +44,11 @@ if (defined $Config->{dsn} and not $ARGV[0] =~ /^-s(etup)?$/) {
     for (qw/dsn user password/) {
         $Config->{$_} = prompt "The $_ for tests:", $Config->{$_};
         $Config->{$_} = "" if $Config->{$_} eq "NONE";
+
+        if ($Config->{dsn} =~ /^skip$/i) {
+            print "\nOK - The test suite will be SKIPPED!\n";
+	    last;
+        }
     }
 }
 
@@ -50,12 +58,11 @@ print qq[
             dsn      = '$Config->{dsn}'
             user     = '$Config->{user}'
             password = '$Config->{password}'
-\n];
+\n] unless $Config->{dsn} =~ /^skip$/i;
 
 
-
-mkdir $_, 0700
-    for qw[testconfig testconfig/Class testconfig/Class/Tables];
+use File::Path;
+mkpath "testconfig/Class/Tables", 0, 0700;
 
 open OUT, '>testconfig/Class/Tables/TestConfig.pm'
     or die "Error writing the TestConfig\n";

@@ -2,6 +2,16 @@ Forgive the format (or lack thereof) of this file, as it's mostly a
 stream-of-consciousness hodge-podge of random ideas.
 
 
+CLASS::DBI
+
+  use Class::Tables;
+  Class::Tables->dbh($dbh);
+
+  print Class::Tables->as_class_dbi;
+
+To print Class::DBI-equivalent skeleton code for the object classes?
+
+
 MANY-TO-MANY
 
 In a many-to-many mapping table, the additional primary key column
@@ -57,3 +67,5 @@ in the pod:
   }
 
 Might this be worth looking into?
+
+Update: not possible to declare the same sub twice with different attribs.

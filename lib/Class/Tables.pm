@@ -5,7 +5,7 @@ use strict;
 use warnings;
 use vars qw/$VERSION $DBH $DB_DRIVER $SQL_DEBUG $INFLECT $SQL_QUERIES $CASCADE/;
 
-$VERSION = "0.26";
+$VERSION = "0.27";
 $INFLECT = 1;
 $CASCADE = 1;
 
@@ -36,9 +36,14 @@ sub dbh {
 
     no strict qw/refs subs/;
     
-    *PL_N = ($INFLECT && eval "use Lingua::EN::Inflect; 1")
-        ? \&Lingua::EN::Inflect::PL_N
-        : sub { $_[0] . "s" };
+    *plural_cmp = ($INFLECT && eval "use Lingua::EN::Inflect; 1")
+        ? sub {
+              !! ( Lingua::EN::Inflect::PL_N_eq(@_) =~ /^(?:s:p|eq)$/ );
+          }
+        : sub {
+              my ($x, $y) = @_;
+              !! ( $x eq ($y . "s") or $x eq $y );
+          };
 
     $super->_parse_tables();
 }
@@ -50,13 +55,10 @@ sub dbh {
 sub fetch {
     my ($class, $id) = @_;
     my $id_col = $class->_id_col;
-    
-    if (exists $OBJ{$class}{$id}) {
-        $CLASS{$class}{stub_count}{$id}++;
-        return bless \$id, $class;
-    }
-    
-    return scalar $class->_stubs("where $id_col=?", $id);
+
+    return exists $OBJ{$class}{$id}
+        ? $class->_mk_obj($id)
+        : scalar $class->_get_objs("where $id_col=?", $id);
 }
 
 sub search {
@@ -74,7 +76,7 @@ sub search {
     $clause .= " order by " . $class->_order_by;
     $clause .= " limit 1" unless wantarray;
     
-    return $class->_stubs($clause, @binds);
+    return $class->_get_objs($clause, @binds);
 }
 
 sub new {
@@ -92,10 +94,10 @@ sub new {
                 
     sql_do($sql, @binds) or return undef;
     
-    my $id  = $DB_DRIVER->insert_id($DBH)
-        or die "Couldn't get insert_id";
+    my $id = $DB_DRIVER->insert_id($DBH, $table, $class->_id_col)
+        or die "Couldn't get last insert id";
     
-    my $obj = $class->_mk_stub($id);
+    my $obj = $class->_mk_obj($id);
     @{ $OBJ{$class}{$id} }{@cols} = @binds;
     
     return $obj;
@@ -105,15 +107,17 @@ sub new {
 ## inherited object methods ##
 ##############################
 
-sub id { ${ $_[0] }  }
+sub id { ${ $_[0] } }
 
 sub DESTROY {
     my $self  = shift;
     my $class = ref $self;
     my $id    = $self->id;
 
-    delete $OBJ{$class}{$id}
-        unless --$CLASS{$class}{stub_count}{$id};
+    if (0 == --$CLASS{$class}{obj_count}{$id}) {
+        delete $OBJ{$class}{$id};
+        delete $CLASS{$class}{obj_count}{$id};
+    }
 }
 
 sub AUTOLOAD {
@@ -143,14 +147,14 @@ sub field {
     my $col    = $CLASS{$class}{accessors}{$field}{col};
 
     return $TABLE_MAP{$ref}->search( $col => $id, @_ )
-        if $type eq 'indirect';
+        if $type eq '1-to-n';
 
     ## lazy-load columns now
     $OBJ{$class}{$id}{$col} =
             sql_do("select $col from $table where $id_col=?", $id)
         if not exists $OBJ{$class}{$id}{$col};
 
-    if ( $type eq 'direct' ) {
+    if ( $type eq '1-to-1' ) {
         if (@_) {
             my $ref_id = UNIVERSAL::can($_[0], 'id') ? $_[0]->id : $_[0];
             
@@ -182,7 +186,7 @@ sub delete {
     my $id_col = $class->_id_col;
 
     if ($CASCADE) {    
-        my @cascade = grep { $CLASS{$class}{accessors}{$_}{type} eq 'indirect' }
+        my @cascade = grep { $CLASS{$class}{accessors}{$_}{type} eq '1-to-n' }
                       keys %{ $CLASS{$class}{accessors} };
         
         for my $accessor (@cascade) {
@@ -223,14 +227,14 @@ sub dump {
 
     my %h = map {
         my $type   = $CLASS{$class}{accessors}{$_}{type};
-        my @result = $self->$_ unless $type eq 'alias';
+        my @result = $self->$_;
         my %values;
         
-        if ($type eq 'indirect') {
+        if ($type eq '1-to-n') {
         
             $values{$_} = [ map { $_->dump(@ignore) } @result ];
             
-        } elsif ($type eq 'direct') {
+        } elsif ($type eq '1-to-1') {
             if ($result[0]) {
                 my $r = $result[0]->dump(@ignore);
                 my $prefix = $_;
@@ -258,29 +262,32 @@ sub dump {
 ## private class methods ##
 ###########################
 
+sub _where_id {
+    "where " . join " and " => map { "$_=?" } $_[0]->_id_col;
+}
+
 sub _table     { $CLASS{ $_[0] }{table}; }
 sub _load_cols { @{ $CLASS{ $_[0] }{load_cols} }; }
 sub _id_col    { $CLASS{ $_[0] }{id_col}; }
 sub _accessors { keys %{ $CLASS{ $_[0] }{accessors} }; }
 sub _order_by  { $CLASS{ $_[0] }{order_by} ||= $_[0]->_id_col; }
 
-sub _mk_stub {
+sub _mk_obj {
     my ($class, $id) = @_;
     
-    $CLASS{$class}{stub_count}{$id}++;
+    $CLASS{$class}{obj_count}{$id}++;
     return bless \$id, $class;
 }
 
 my $MAX_ROWS = 5_000;
 
-sub _stubs {
+sub _get_objs {
     my $class  = shift;
     my $clause = shift;
-    my $id_col = $class->_id_col;
     my $table  = $class->_table;
-    my @stubs;
-    my @cols   = ($id_col, $class->_load_cols);
-    
+    my @cols   = ($class->_id_col, $class->_load_cols);
+
+    my @objs;
     my $sql    = sprintf "select %s from $table $clause", join "," => @cols;
     my $q      = sql_query($sql, @_);
     
@@ -288,13 +295,13 @@ sub _stubs {
 
     while (my $row = $q->fetchrow_arrayref) {
         my $id = $row->[0];
-        push @stubs, $class->_mk_stub($id);
+        push @objs, $class->_mk_obj($id);
         @{ $OBJ{$class}{$id} }{@cols} = @$row;
     }
 
     $q->finish;
     
-    return wantarray ? @stubs : $stubs[0];
+    return wantarray ? @objs : $objs[0];
 }
 
 ##################
@@ -325,7 +332,7 @@ sub _parse_tables {
         for my $col ( @{ $map{$table}{col_order} } ) {
         
             my $col_type = $map{$table}{cols}{$col}{type};
-            my $primary = $map{$table}{cols}{$col}{primary};
+            my $primary  = $map{$table}{cols}{$col}{primary};
             
             my ($field, $type, $ref) = _accessor_type($table, $col);
 
@@ -350,11 +357,11 @@ sub _parse_tables {
             };
 
             ## reverse the foreign keys in the appropriate class
-            if ($type eq 'direct') {
+            if ($type eq '1-to-1') {
                 my $ref_class = $TABLE_MAP{$ref};
                 $CLASS{$ref_class}{accessors}{$table} = {
                     col  => $field,
-                    type => 'indirect',
+                    type => '1-to-n',
                     ref  => $table
                 };
             }
@@ -363,7 +370,7 @@ sub _parse_tables {
                 unless exists $CLASS{$class}{order_by};
             
             push @{ $CLASS{$class}{load_cols} }, $col
-                unless $col_type =~ /blob|text/;
+                unless $col_type =~ /blob|text|bytea/;
                 
         }
 
@@ -374,51 +381,44 @@ sub _parse_tables {
 #####
 
 sub _accessor_type {
-    my ($table, $name) = @_;
+    my ($table, $col) = @_;
+
+    ## $name is the name of the accessor *method*
+    ## $ref is the name of the table being referred to, for foreign keys
 
     my $type = 'normal';
     my $ref  = '';
+    my $name = $col;
     
     ## remove optional prefix of "tablename_" (accounting for singular/plural)
     ## .. couldn't do this with one giant extended regex, because PL_N re-
     ## invokes the regex engine.
     
-    while ($name =~ /_/g) {
-        my $pre = substr($name, 0, pos($name) - 1);
-        my $post = substr($name, pos $name);
+    while ($col =~ /_/g) {
+        my $pre  = substr($col, 0, pos($col) - 1);
+        my $post = substr($col, pos $col);
         
-        if ($pre eq $table or PL_N($pre) eq $table) {
-            $name = $post;
+        if (plural_cmp($pre, $table)) {
+            $name = $col = $post;
             last;
         }
     }
     
+    $col =~ s/_id$//;
     
-    if ($name =~ s/_id$//) {
-        if ($name eq $table) {
-            $name = $type = 'id';
-        } elsif (PL_N($name) eq $table) {
-            $name = $type = 'id';
-        } elsif (exists $TABLE_MAP{$name}) {
-            $type = 'direct';
-            $ref  = $name;
-        } elsif ( exists $TABLE_MAP{ PL_N($name) } ) {
-            $type = 'direct';
-            $ref  = PL_N($name);
-        }
-    } elsif ($name eq 'id') {
-        $type = 'id';
-    } elsif (exists $TABLE_MAP{$name}) {
-        $type = 'direct';
-        $ref  = $name;
-    } elsif (exists $TABLE_MAP{ PL_N($name) }) {
-        $type = 'direct';
-        $ref  = PL_N($name);
+    if ( $col eq "id" ) { # or ($col =~ s/_id$// and plural_cmp($col, $table)) ) {
+        $name = $type = 'id';
     }
-
-    ## $name is the name of the accessor METHOD
-    ## $ref  is the name of the table in a direct accessor
-
+    
+    for my $t (keys %TABLE_MAP) {
+        if (plural_cmp($col, $t)) {
+            $name = $col;
+            $type = "1-to-1";
+            $ref  = $t;
+            last;
+        }
+    }
+                
     return ($name, $type, $ref);
 }
 
@@ -463,13 +463,14 @@ sub sql_query {
 }
 
 sub sql_do {
-    my $sth = sql_query(@_) or return undef;
-
-    my @ret = $_[0] =~ /^\s*select/i 
+    my $sql = shift;    
+    my $sth = sql_query($sql, @_) or return undef;
+    
+    my @ret = $sql =~ /^\s*select/i
         ? $sth->fetchrow_array
         : (1);
+    
     $sth->finish;
-
     return wantarray ? @ret : $ret[0];
 }
 
@@ -626,12 +627,16 @@ singular or plural nouns. (See L<Plural And Singular Nouns>)
 Note: For simplicity and transparency, the associated object accessor is
 always named C<id>, regardless of the underlying column name.
 
-In MySQL, the primary key column must be set to C<AUTO_INCREMENT>. In SQLite,
-the primary key may be an auto increment column (in SQLite this is only
-possible if the column is the first column in the table and declared as
+In MySQL, the primary key column must be set to C<AUTO_INCREMENT>.
+
+In SQLite, the primary key may be an auto increment column (in SQLite this is
+only possible if the column is the first column in the table and declared as
 C<integer primary key>) using the same naming conventions as above.
 Alternatively, you may omit an explicit primary key column and Class::Tables
 will use the hidden C<ROWID> column.
+
+In Postgres, the primary key column must be a C<serial primary key>. Using
+the hidden C<oid> column as primary key is not (yet) supported.
 
 =item Foreign Key Inflating
 
@@ -650,7 +655,7 @@ column name whether your table names are singular or plural. (See
 L<Plural And Singular Nouns>).
 
 The foreign key relationship is also reversed as described in the example. The
-name of the accessor in the opposite direction is the name of the table. In
+name of the accessor in the opposite 1-to-1ion is the name of the table. In
 our example, this means that objects of the C<Departments> class get an
 accessor named C<employees>. For this reason, it is often convenient to name
 the tables as plural nouns.
@@ -669,7 +674,7 @@ on C<name>.
 
 =item Stringification
 
-If the table has a C<name> column, then any objects of that type will
+If the table has a C<name> accessor, then any objects of that type will
 stringify to the value of C<< $obj->name >>. Otherwise, the object will
 stringify to C<CLASS:ID>.
 
@@ -855,6 +860,9 @@ objects matched). In scalar context returns only the first object returned
 by the query (or C<undef> if no objects matched). The scalar context SQL query
 is slightly optimized.
 
+C<field1>, C<field2>, etc, must be names of the I<accessors>, and not the
+underlying column.
+
 As usual, for foreign key attributes, you may pass an actual object or an ID.
 If no arguments are passed to C<search>, every object in the class is
 returned.
@@ -994,10 +1002,11 @@ You can manually disable using L<Lingua::EN::Inflect|Lingua::EN::Inflect> with
 
 =item *
 
-Supported database drivers are MySQL and SQLite. With SQLite, you can only
-get an auto-incremented ID column if it is the first column in the table, and
-if it is declared as C<integer primary key>. Class::Tables doesn't (yet)
-support the hidden C<rowid> column in SQLite.
+Supported database drivers are MySQL, SQLite, and Postgres. With SQLite, you
+can only get an auto-incremented ID column if it is the first column in the
+table, and if it is declared as C<integer primary key> (or you can just use
+the hidden C<rowid> column). With Postgres, only C<serial primary key>s are
+supported (usign the C<oid> column as primary key is not yet supported).
 
 =item *
 
@@ -1023,6 +1032,6 @@ free to contact me with comments, questions, patches, or whatever.
 
 =head1 COPYRIGHT
 
-Copyright (c) 2003 Mike Rosulek. All rights reserved. This module is free 
+Copyright (c) 2004 Mike Rosulek. All rights reserved. This module is free 
 software; you can redistribute it and/or modify it under the same terms as Perl 
 itself.

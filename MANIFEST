@@ -6,5 +6,6 @@ TODO
 lib/Class/Tables.pm
 lib/Class/Tables/mysql.pm
 lib/Class/Tables/SQLite.pm
+lib/Class/Tables/Pg.pm
 test.pl
 META.yml                                 Module meta-data (added by MakeMaker)

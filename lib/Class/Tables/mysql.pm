@@ -1,6 +1,6 @@
 package Class::Tables::mysql;
 use vars '$VERSION';
-$VERSION = "0.26";
+$VERSION = "0.27";
 
 sub map_tables {
     my ($self, $dbh) = @_;

@@ -1,5 +1,10 @@
 Revision history for Perl extension Class::Tables.
 
+0.27	Sat Feb 7 2004
+	- More tests.
+	- Can now manually skip test suite in Makefile.PL (for jeffa).
+	- New Postgres support.
+
 0.26	Thu Jan 22 2004
 	- Added POD section about subclassing.
 	- Optional "tablename_" prefix for any column (idea from Ron Savage).
