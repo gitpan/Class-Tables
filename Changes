@@ -1,6 +1,11 @@
 Revision history for Perl extension Class::Tables.
 
-0.28	Tue Jul 6 2004
+0.29	Fri Jul 23 2004
+	- Bug fixed in search() and new(), when 1-to-many accessor name used
+	- Bug fixed in Storable serialization
+	- Initial n-to-n support
+
+0.28	Thu Jul 15 2004
 	- Use diag() in test.pl instead of print
 	- Schema cache with Storable
 	- field() accessor update

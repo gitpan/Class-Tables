@@ -1,6 +1,6 @@
 package Class::Tables::Pg;
 use vars '$VERSION';
-$VERSION = "0.28";
+$VERSION = "0.29_1";
 
 sub map_tables {
     my ($self, $dbh) = @_;

@@ -6,7 +6,7 @@ use strict;
 use warnings;
 use vars qw/$VERSION $DBH $DB_DRIVER $SQL_DEBUG $INFLECT $SQL_QUERIES $CASCADE/;
 
-$VERSION = "0.28";
+$VERSION = "0.29_1";
 $INFLECT = 1;
 $CASCADE = 1;
 
@@ -46,38 +46,52 @@ sub dbh {
 sub fetch {
     my ($class, $id) = @_;
     my $id_col = $class->_id_col;
+    my @cols   = ($id_col, $class->_load_cols);
+    my $table  = $class->_table;
+    
+    my $sql    = sprintf "select %s from $table where $id_col=?",
+                     join "," => @cols;
 
     return exists $OBJ{$class}{$id}
         ? $class->_mk_obj($id)
-        : scalar $class->_get_objs("where $id_col=?", $id);
+        : scalar $class->_get_objs($sql, $id);
 }
 
 sub search {
     my ($class, %params) = @_;
     return unless defined wantarray;
     
-    my @fields = grep { exists $CLASS{$class}{accessors}{$_} }
+    my @fields = grep { $CLASS{$class}{accessors}{$_}{type} ne "1-to-n" }
+                 grep { exists $CLASS{$class}{accessors}{$_} }
                  keys %params;
     my @binds  = map { UNIVERSAL::can($_, 'id') ? $_->id : $_ }
                  grep { defined } @params{@fields};
 
-    my $clause = (@fields ? "where " : "");
-    $clause   .= join " and " => map {
+    my @cols   = ($class->_id_col, $class->_load_cols);
+    my $sql    = sprintf "select %s from %s",
+                     join("," => @cols),
+                     $class->_table;
+
+    $sql      .= (@fields ? " where " : "");
+    $sql      .= join " and " => map {
                       my $col = $CLASS{$class}{accessors}{$_}{col};
                       defined $params{$_} ? "$col=?" : "$col is null"
                  } @fields;
-    $clause   .= " order by " . $class->_order_by;
-    $clause   .= " limit 1" unless wantarray;
+    $sql      .= " order by " . $class->_order_by;
+    $sql      .= " limit 1" unless wantarray;
     
-    return $class->_get_objs($clause, @binds);
+    return $class->_get_objs($sql, @binds);
 }
 
 sub new {
     my ($class, %params) = @_;
     delete $params{id};
 
-    my @fields = grep { exists $CLASS{$class}{accessors}{$_} } keys %params;
-    my @binds  = map { UNIVERSAL::can($_, 'id') ? $_->id : $_ } @params{@fields};
+    my @fields = grep { $CLASS{$class}{accessors}{$_}{type} ne "1-to-n" }
+                 grep { exists $CLASS{$class}{accessors}{$_} }
+                 keys %params;
+    my @binds  = map { UNIVERSAL::can($_, 'id') ? $_->id : $_ }
+                 @params{@fields};
     my @cols   = map { $CLASS{$class}{accessors}{$_}{col} } @fields;
 
     my $table  = $class->_table;
@@ -127,10 +141,7 @@ sub AUTOLOAD {
 sub field {
     my $self   = shift;
     my $field  = shift;
-    my $id     = $self->id;
     my $class  = ref $self;
-    my $table  = $class->_table;
-    my $id_col = $class->_id_col;
     
     return keys %{ $CLASS{$class}{accessors} }
         unless defined $field;
@@ -138,44 +149,110 @@ sub field {
     croak qq{Can't locate accessor "$field" via package "$class"}
         unless exists $CLASS{$class}{accessors}{$field};
 
-    my $type   = $CLASS{$class}{accessors}{$field}{type};
+    my $type = $CLASS{$class}{accessors}{$field}{type};
+
+    my $handler = {
+        "normal" => \&_normal_accessor,
+        "1-to-1" => \&_1_to_1_accessor,
+        "1-to-n" => \&_1_to_n_accessor,
+        "n-to-n" => \&_n_to_n_accessor,
+    }->{ $type };
+    
+    return $handler->( $self, $field, @_ );
+}
+
+sub _n_to_n_accessor {
+    my $self   = shift;
+    my $field  = shift;
+    my $class  = ref $self;
+    my $table  = $class->_table;
+
+    my $ref    = $CLASS{$class}{accessors}{$field}{ref};
+    my $col    = $CLASS{$class}{accessors}{$field}{col};
+    my $col2   = $CLASS{$class}{accessors}{$field}{col2};
+    
+    ## col is the col in $ref which points to me
+    ## col2 is the col in $ref which points to $field
+    
+    my $r_class  = $TABLE_MAP{$ref};
+    my $f_class  = $TABLE_MAP{$field};
+    my $f_id_col = $f_class->_id_col;
+    my @cols     = ($f_id_col, $f_class->_load_cols);
+
+    my $sql = sprintf "select %s from $field as f, $ref as r where "
+                    . "r.$col2 = f.$f_id_col and r.$col = ? order by r.%s",
+                  join("," => map { "f.$_ as $_" } @cols),
+                  $r_class->_order_by;
+    
+    return $f_class->_get_objs($sql, $self->id);
+}
+
+sub _1_to_n_accessor {
+    my $self   = shift;
+    my $field  = shift;
+    my $id     = $self->id;
+    my $class  = ref $self;
+
     my $ref    = $CLASS{$class}{accessors}{$field}{ref};
     my $col    = $CLASS{$class}{accessors}{$field}{col};
 
     return $TABLE_MAP{$ref}->search( $col => $id, @_ )
-        if $type eq '1-to-n';
+}
 
-    ## lazy-load columns now
-    $OBJ{$class}{$id}{$col} =
-            sql_do("select $col from $table where $id_col=?", $id)
-        if not exists $OBJ{$class}{$id}{$col};
+sub _1_to_1_accessor {
+    my $self   = shift;
+    my $field  = shift;
+    my $id     = $self->id;
+    my $class  = ref $self;
+    my $table  = $class->_table;
+    my $id_col = $class->_id_col;
 
-    if ( $type eq '1-to-1' ) {
-        if (@_) {
-            my $ref_id = UNIVERSAL::can($_[0], 'id') ? $_[0]->id : $_[0];
-            
+    my $ref    = $CLASS{$class}{accessors}{$field}{ref};
+    my $col    = $CLASS{$class}{accessors}{$field}{col};
+    
+    if (@_) {
+        my $ref_id = UNIVERSAL::can($_[0], 'id') ? $_[0]->id : $_[0];
+
+        if (defined $_[0]) {
             sql_do("update $table set $col=? where $id_col=?", $ref_id, $id)
                 and $OBJ{$class}{$id}{$col} = $ref_id;
+        } else {
+            sql_do("update $table set $col=null where $id_col=?", $id)
+                and $OBJ{$class}{$id}{$col} = undef;
         }
-        
-        ## inflate keys
-        return unless defined wantarray;
-        
-        return $TABLE_MAP{$ref}->fetch( $OBJ{$class}{$id}{$col} )
-            if defined $OBJ{$class}{$id}{$col};
+    }
+    
+    return unless defined wantarray;
 
-    } elsif ( $type eq 'normal' ) {
-        if (@_) {
-            if (defined $_[0]) {
-                sql_do("update $table set $col=? where $id_col=?", $_[0], $id)
-                    and $OBJ{$class}{$id}{$col} = shift;
-            } else {
-                sql_do("update $table set $col=null where $id_col=?", $id)
-                    and $OBJ{$class}{$id}{$col} = shift;
-            }
+    ## inflate keys
+    return $TABLE_MAP{$ref}->fetch( $OBJ{$class}{$id}{$col} )
+        if defined $OBJ{$class}{$id}{$col};
+}
+
+sub _normal_accessor {
+    my $self   = shift;
+    my $field  = shift;
+    my $id     = $self->id;
+    my $class  = ref $self;
+    my $table  = $class->_table;
+    my $id_col = $class->_id_col;
+    my $col    = $CLASS{$class}{accessors}{$field}{col};
+
+    if (@_) {
+        if (defined $_[0]) {
+            sql_do("update $table set $col=? where $id_col=?", $_[0], $id)
+                and $OBJ{$class}{$id}{$col} = shift;
+        } else {
+            sql_do("update $table set $col=null where $id_col=?", $id)
+                and $OBJ{$class}{$id}{$col} = shift;
         }
     }
 
+    ## autoload blobs now    
+    $OBJ{$class}{$id}{$col} =
+            sql_do("select $col from $table where $id_col=?", $id)
+        if not exists $OBJ{$class}{$id}{$col};
+    
     return $OBJ{$class}{$id}{$col};
 }
 
@@ -221,7 +298,7 @@ sub dump {
     my $class  = ref $self;
     my $table  = $class->_table;
     my %ignore = map { $_ => 1 } @ignore;
-    my @fields = grep { not $ignore{  $CLASS{$class}{accessors}{$_}{ref}  } }
+    my @fields = grep { not $ignore{ $CLASS{$class}{accessors}{$_}{ref} } }
                  keys %{ $CLASS{$class}{accessors} };
 
     push @ignore, $table;
@@ -266,7 +343,6 @@ sub dump {
 sub _table     { $CLASS{ $_[0] }{table}; }
 sub _load_cols { @{ $CLASS{ $_[0] }{load_cols} }; }
 sub _id_col    { $CLASS{ $_[0] }{id_col}; }
-sub _accessors { keys %{ $CLASS{ $_[0] }{accessors} }; }
 sub _order_by  { $CLASS{ $_[0] }{order_by} ||= $_[0]->_id_col; }
 
 sub _mk_obj {
@@ -278,16 +354,14 @@ sub _mk_obj {
 
 sub _get_objs {
     my $class  = shift;
-    my $clause = shift;
+    my $sql    = shift;
     my $table  = $class->_table;
     my @cols   = ($class->_id_col, $class->_load_cols);
-
-    my @objs;
-    my $sql    = sprintf "select %s from $table $clause", join "," => @cols;
     my $q      = sql_query($sql, @_);
     
     $q->execute(@_);
 
+    my @objs;
     while (my $row = $q->fetchrow_arrayref) {
         my $id = $row->[0];
         push @objs, $class->_mk_obj($id);
@@ -303,9 +377,21 @@ sub _get_objs {
 ## private subs ##
 ##################
 
+sub _load_inflect {
+    my %memoize;
+    
+    no strict qw/refs subs/;
+    *plural = ($INFLECT && eval "use Lingua::EN::Inflect; 1")
+        ? sub { $memoize{$_[0]} ||= Lingua::EN::Inflect::PL_N(@_) }
+        : sub {
+              local $_ = $_[0];
+              s{ (?<=(.)) $ }{ $1 =~ /s|x/ ? "es" : "s" }ex;
+              $_;
+          };
+}
+
 sub _parse_tables {
     my $super = shift;
-
     my ($CACHE, $signature);
     
     if ($SCHEMA_CACHE) {
@@ -317,18 +403,12 @@ sub _parse_tables {
         if (exists $CACHE->{$signature}) {
             %CLASS     = %{ $CACHE->{$signature}{CLASS} };
             %TABLE_MAP = %{ $CACHE->{$signature}{TABLE_MAP} };
+            $super->_generate_subclass($_) for keys %CLASS;
             return;
         }
     }
-
-    {
-        my %memoize;
     
-        no strict qw/refs subs/;
-        *plural = ($INFLECT && eval "use Lingua::EN::Inflect; 1")
-            ? sub { $memoize{$_[0]} ||= Lingua::EN::Inflect::PL_N(@_) }
-            : sub { $_[0] . "s" };
-    }
+    _load_inflect();
 
     my %map = %{ $DB_DRIVER->map_tables($DBH) };
 
@@ -342,18 +422,19 @@ sub _parse_tables {
         $TABLE_MAP{$table}    = $class;
         $CLASS{$class}{table} = $table;
         
-        $super->_generate_package($class);
+        $super->_generate_subclass($class);
     }
 
     for my $table (keys %map) {
         my $class = $TABLE_MAP{$table};
+        my @fkeys;
 
         for my $col ( @{ $map{$table}{col_order} } ) {
         
             my $col_type = $map{$table}{cols}{$col}{type};
             my $primary  = $map{$table}{cols}{$col}{primary};
             
-            my ($field, $type, $ref) = _accessor_type($table, $col);
+            my ($field, $type, $ref) = _col_type($table, $col);
 
             if ($primary or $type eq "id") {
                 croak "Two primary key columns detected for the '$table' "
@@ -383,6 +464,8 @@ sub _parse_tables {
                     type => '1-to-n',
                     ref  => $table
                 };
+                
+                push @fkeys, $field;
             }
 
             $CLASS{$class}{order_by} = $col
@@ -391,6 +474,30 @@ sub _parse_tables {
             push @{ $CLASS{$class}{load_cols} }, $col
                 unless $col_type =~ /blob|text|bytea/;
                 
+        }
+
+        ## two 1-to-1 accessors become a pair of n-to-n accessors
+        next if @fkeys < 2;
+
+        for my $src (@fkeys) {
+            my $src_col   = $CLASS{$class}{accessors}{$src}{col};
+            my $src_table = $CLASS{$class}{accessors}{$src}{ref};
+            my $src_class = $TABLE_MAP{ $src_table };
+            
+            for my $dest (@fkeys) {
+                next if $src eq $dest;
+
+                my $dest_col   = $CLASS{$class}{accessors}{$dest}{col};
+                my $dest_table = $CLASS{$class}{accessors}{$dest}{ref};
+                my $dest_class = $TABLE_MAP{ $dest_table };
+                
+                $CLASS{$src_class}{accessors}{$dest_table} = {
+                    col  => $src_col,
+                    col2 => $dest_col,
+                    ref  => $table,
+                    type => "n-to-n"
+                };
+            }
         }
 
     }
@@ -406,7 +513,7 @@ sub _parse_tables {
 
 #####
 
-sub _accessor_type {
+sub _col_type {
     my ($table, $col) = @_;
 
     ## $name is the name of the accessor *method*
@@ -447,12 +554,9 @@ sub _accessor_type {
 
 sub _table_to_package_name {
     return join "" => map ucfirst, split /_/, lc shift;
-    my $table = lc shift;
-    $table =~ s/(?:^|_)(.)/uc $1/ge;
-    return $table;
 }
 
-sub _generate_package {
+sub _generate_subclass {
     my ($super, $class) = @_;
     no strict 'refs';
     
@@ -613,6 +717,16 @@ C<Employees> objects referencing the particular C<Departments> object.
 
 Notice how the plural vs. singular names of the methods match their return
 values. This is all automatic! (See L<Plural And Singular Nouns>)
+
+=item Many-To-Many
+
+If a table X has two (or more) foreign key columns, pointing to tables Y and Z
+for instance, then Y will get a many-to-many accessor to Z (and vice versa)
+mapping through X.
+
+For instance, suppose we have a C<tracks> table relating albums to songs, and
+with an extra C<number> column. Then the C<Albums> class will get a C<songs>
+accessor that returns the C<Songs> objects corresponding to that album.
 
 =back
 
@@ -784,7 +898,8 @@ Employees in a certain department are deleted, the department object is not
 automatically deleted. If you want this behavior, you must add it yourself
 in the Employees::delete method.
 
-=item C<< $obj->attrib >> and C<< $obj->attrib($new_val) >>
+=item C<< $obj->attrib >>
+=item C<< $obj->attrib($new_val) >>
 
 For normal columns in the table (that is, columns not determined to be a
 foreign key reference), accessor/mutator methods are provided to get and
@@ -809,12 +924,24 @@ appropriate class, which means you can also pass additional constraints:
   my @volunteers = $marketing->employees( salary => 0 );
   ## same as Employees->search( department => $marketing, salary => 0 );
 
+For many-to-many accessors, the following two are functionally equivalent:
+
+  ## many to many accessor
+  my @songs = $album->songs;
+  
+  ## the long way
+  my @songs = map $_->song, $album->tracks;
+
+However, the many-to-many accessor does an SQL join internally and is therefore
+more efficient.
+
 For I<all> columns in the table C<tablename>, the column name will have any
 C<tablename_> prefix removed in the name of the accessor (plus or minus
 pluralization). So in the Employees table, the column name is effectively
 treated with C<s/^employees?_//> before consideration.
 
-=item C<< $obj->field($field) >> and C<< $obj->field($field, $new_val) >>
+=item C<< $obj->field($field) >>
+=item C<< $obj->field($field, $new_val) >>
 
 This is an alternative syntax to accessors/mutators. When C<$field> is the
 name of a valid accessor/mutator method for the object, this is equivalent to
@@ -1083,6 +1210,9 @@ C<use Class::Tables> line are global.
 
 Class::Tables is written by Mike Rosulek E<lt>mike@mikero.comE<gt>. Feel 
 free to contact me with comments, questions, patches, or whatever.
+
+Initial many-to-many relationship support by Matt Diephouse
+E<lt>matt@diephouse.comE<gt>.
 
 =head1 COPYRIGHT
 

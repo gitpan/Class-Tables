@@ -1,12 +1,12 @@
-#!/usr/bin/perl
+#!/usr/bin/perl -w
+
+use constant NUM_TESTS => 74;
 
 use strict;
 use Test::More;
 use DBI;
 
-# use warnings;
 # use Data::Dumper;
-
 # $Class::Tables::SQL_DEBUG++;
 
 ############################
@@ -67,7 +67,7 @@ if (not $dbh) {
 		   . "the connection parameters for the test database.";
 
 } else {
-    plan tests => 70;
+    plan tests => NUM_TESTS;
     diag "Starting test suite. Run `perl Makefile.PL -s` to reconfigure "
        . "connection parameters for the test database.";
 }
@@ -289,6 +289,9 @@ is( Employees->search( name => "Frodo Baggins" )->name,
 ok( scalar Employees->search(department => Departments->fetch(3)),
     "search with object constraint on foreign key" );
 
+ok( scalar Employees->search(purchases => 1, foo => "bar"),
+    "search with bogus/evil constraint name" );
+
 ########################
 ## instance accessors ##
 ########################
@@ -305,7 +308,8 @@ my %simple_accessors = (
         name         => '',
         department   => "Departments",
         photo        => '',
-        purchases    => "Purchases" # x
+        purchases    => "Purchases", # x
+        products     => "Products"   # n-to-n
     },
     Purchases => {
         id          => '',
@@ -320,7 +324,8 @@ my %simple_accessors = (
         name        => '',
         weight      => '',
         price       => '',
-        purchases   => "Purchases" # x
+        purchases   => "Purchases", # x
+        employees   => "Employees"  # n-to-n
     }
 );
 
@@ -347,6 +352,18 @@ for my $class (keys %simple_accessors) {
 
 ok( $field_ok,
     "field() accessor with no args" );
+
+## n-to-n accessors:
+
+{
+    my @long_way  = map { $_->product } Employees->fetch(1)->purchases;
+    my @short_way = Employees->fetch(1)->products;
+    
+    is_deeply(
+        [ map { $_->id } @long_way ],
+        [ map { $_->id } @short_way ],
+        "n-to-n accessors" );
+}
 
 ####
 
