@@ -5,7 +5,7 @@ use strict;
 use warnings;
 use vars qw/$AUTOLOAD $VERSION/;
 
-$VERSION = 0.21;
+$VERSION = 0.22;
 
 our (%CLASS_INFO, %OBJ_DATA, %TABLE_MAP, %TABLE_INFO, %STUB_COUNT, $DBH);
 
@@ -147,7 +147,7 @@ sub field {
         if (my $new = shift) {
             my $ref_id = ref $new ? $new->id : $new;
             
-            sql_do("update $table set $field=? where id=?", $new, $ref_id)
+            sql_do("update $table set $field=? where id=?", $ref_id, $id)
                 and $attr_value = $new;
         }
 
@@ -380,7 +380,7 @@ __END__
 
 =head1 NAME
 
-Class::Tables - Lightweight, zero-configuration object-DB abstraction
+Class::Tables - Relational-object interface with no configuration necessary
 
 =head1 SYNOPSIS
 
@@ -390,6 +390,7 @@ very basic rules:
   
   use Class::Tables;
   Class::Tables->dbh( DBI->connect($dsn, $user, $passwd) );
+  ## that's all you have to do to get this:
   
   my $new_guy = Employee->new( name => "Bilbo Baggins" );
   my $old_guy = Employee->fetch( $id );
@@ -545,33 +546,35 @@ This is an alternative syntax to accessors/mutators. If you aren't a fan
 of variable method names, you can use the C<field> method:
 
   for my $thing (qw/name age favorite_color/) {
-    ## these two are equivalent:
-    print $obj->$thing, $/;
-    print $obj->field($thing), $/;
+      ## these two are equivalent:
+      print $obj->$thing, $/;
+      print $obj->field($thing), $/;
   }
 
 =item C<$obj-E<gt>dump>
 
 Returns a hashref containing the object's attribute data. Recursively
-inflates foreign keys, too. Reverse foreign keys are mapped to an
-array ref. You may find this useful with HTML::Template!
+inflates foreign keys, too. Reverse foreign keys are mapped to an array ref.
+You may find this useful with HTML::Template! Use Data::Dumper on this to
+see how it does things...
 
 =back
 
 =head1 OTHER STUFF
 
-You can still override/augment object methods with SUPER:
+You can still override/augment object methods if you need to with SUPER:
 
   package Employee;
   sub ssn {
       my $self = shift;
-      my $ssn = $self->SUPER::ssn;
+      my $ssn = $self->SUPER::ssn(@_);
       $ssn =~ s/(\d{3})(\d{2})(\d{4})/$1-$2-$3/;
       return $ssn;
   }
 
-But since the objects are blessed scalars, you have to use something like
-this to store extra (non-persistent) subclass attributes with the objects:
+But since the objects are blessed scalars, you have to use some sort of
+inside-out mechanism to store extra (non-persistent) subclass attributes
+with the objects:
 
   ## if you want to do something like this:
   
@@ -588,3 +591,20 @@ this to store extra (non-persistent) subclass attributes with the objects:
   my %seen;
   sub seen_already { $seen{+shift};   }
   sub see          { $seen{+shift}++; }
+
+=head1 CAVEATS
+
+So far, the table parsing code only works with MySQL. Same with getting the
+ID of the last inserted object. Testers/patchers for other DBMS's welcome!
+
+=head1 AUTHOR
+
+Class::Tables is written by Mike Rosulek E<lt>mike@mikero.comE<gt>. Feel 
+free to contact me with comments, questions, patches, or whatever.
+
+=head1 COPYRIGHT
+
+Copyright (c) 2003 Mike Rosulek. All rights reserved. This module is free 
+software; you can redistribute it and/or modify it under the same terms as Perl 
+itself.
+

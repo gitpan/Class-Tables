@@ -1,5 +1,10 @@
 Revision history for Perl extension Class::Tables.
 
+0.22	Thu Oct 16 2003
+	- An actual test suite, nice!
+	- Whaddya know, the test suite found a bug in foreign key mutators
+	- POD updates, including adding a copyright notice. Oops!
+
 0.21	Wed Oct 15 2003
 	- First public release!
 	- Decided on a name! Class::Tables
