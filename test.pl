@@ -67,7 +67,7 @@ if (not $dbh) {
 		   . "the connection parameters for the test database.";
 
 } else {
-    plan tests => 67;
+    plan tests => 70;
     diag "Starting test suite. Run `perl Makefile.PL -s` to reconfigure "
        . "connection parameters for the test database.";
 }
@@ -115,7 +115,7 @@ $dbh->do($_) for (split /\s*;\s*/, <<"END_OF_SQL");
     create table products (
         id              $pkey,
         name            varchar(50) not null,
-        weight          integer not null,
+        weight          integer,
         price           decimal
     );
     
@@ -522,6 +522,30 @@ is( scalar Employees->search,
     undef,
     "delete all in a table" );
 
+#######################
+## undef/null values ##
+#######################
+
+{
+    my $prod = Products->fetch(4);
+    $prod->weight(undef);
+
+    my $ar = $dbh->selectall_arrayref("select weight from products where id=4");
+    
+    ok( exists $ar->[0][0] && ! defined $ar->[0][0],
+        "undef becomes NULL in database" );
+
+}
+
+## flyweight object goes out of scope, so next line must query the database
+
+ok( ! defined Products->fetch(4)->weight,
+    "NULL database values come back undef" );
+
+is( scalar( () = Products->search( weight => undef ) ),
+    1,
+    "search method handles searching with IS NULL" );
+
 ###########################
 ## subclassing revisited ##
 ###########################
@@ -534,7 +558,7 @@ isnt(
 ## done!
 
 $timer = times - $timer;
-diag "SUMMARY: $Class::Tables::SQL_QUERIES queries, ${timer}s ($driver)";
+diag "SUMMARY: $Class::Tables::SQL_QUERIES queries, ${timer}s (using $driver)";
 
 #############
 ## cleanup ##

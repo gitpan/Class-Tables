@@ -6,7 +6,7 @@ use strict;
 use warnings;
 use vars qw/$VERSION $DBH $DB_DRIVER $SQL_DEBUG $INFLECT $SQL_QUERIES $CASCADE/;
 
-$VERSION = "0.28_1";
+$VERSION = "0.28";
 $INFLECT = 1;
 $CASCADE = 1;
 
@@ -54,18 +54,20 @@ sub fetch {
 
 sub search {
     my ($class, %params) = @_;
-    
     return unless defined wantarray;
     
-    my @fields = grep { exists $CLASS{$class}{accessors}{$_} } keys %params;
-    my @binds  = map { UNIVERSAL::can($_, 'id') ? $_->id : $_ } @params{@fields};
-    my @cols   = map { $CLASS{$class}{accessors}{$_}{col} } @fields;
+    my @fields = grep { exists $CLASS{$class}{accessors}{$_} }
+                 keys %params;
+    my @binds  = map { UNIVERSAL::can($_, 'id') ? $_->id : $_ }
+                 grep { defined } @params{@fields};
 
-    my $clause = @cols
-        ? "where " . join(" and " => map "$_=?", @cols)
-        : "";
-    $clause .= " order by " . $class->_order_by;
-    $clause .= " limit 1" unless wantarray;
+    my $clause = (@fields ? "where " : "");
+    $clause   .= join " and " => map {
+                      my $col = $CLASS{$class}{accessors}{$_}{col};
+                      defined $params{$_} ? "$col=?" : "$col is null"
+                 } @fields;
+    $clause   .= " order by " . $class->_order_by;
+    $clause   .= " limit 1" unless wantarray;
     
     return $class->_get_objs($clause, @binds);
 }
@@ -81,11 +83,10 @@ sub new {
     my $table  = $class->_table;
     my $sql    = sprintf "insert into $table (%s) values (%s)",
                      join("," => @cols),
-                     join("," => ("?") x @cols);
+                     join("," => map { defined $_ ? "?" : "null" } @binds);
                 
-    sql_do($sql, @binds) or return undef;
+    sql_do($sql, grep { defined } @binds) or return undef;
     
-#    my $id = $DBH->last_insert_id(undef, undef, $table, $class->_id_col)
     my $id = $DB_DRIVER->insert_id($DBH, $table, $class->_id_col)
         or die "Couldn't get last insert id";
      
@@ -165,8 +166,13 @@ sub field {
 
     } elsif ( $type eq 'normal' ) {
         if (@_) {
-            sql_do("update $table set $col=? where $id_col=?", $_[0], $id)
-                and $OBJ{$class}{$id}{$col} = shift;
+            if (defined $_[0]) {
+                sql_do("update $table set $col=? where $id_col=?", $_[0], $id)
+                    and $OBJ{$class}{$id}{$col} = shift;
+            } else {
+                sql_do("update $table set $col=null where $id_col=?", $id)
+                    and $OBJ{$class}{$id}{$col} = shift;
+            }
         }
     }
 

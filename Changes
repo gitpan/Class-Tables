@@ -2,8 +2,9 @@ Revision history for Perl extension Class::Tables.
 
 0.28	Tue Jul 6 2004
 	- Use diag() in test.pl instead of print
-	- Schema cache with storable
+	- Schema cache with Storable
 	- field() accessor update
+	- undefs correctly handled as NULLs everywhere
 
 0.27	Sat Feb 7 2004
 	- More tests.

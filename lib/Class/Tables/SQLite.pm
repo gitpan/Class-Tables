@@ -1,6 +1,6 @@
 package Class::Tables::SQLite;
 use vars '$VERSION';
-$VERSION = "0.27";
+$VERSION = "0.28";
 
 sub map_tables {
     my ($self, $dbh) = @_;

@@ -18,6 +18,7 @@ This module requires these other modules and libraries:
    DBI
    DBD::mysql, DBD::SQLite, or DBD::Pg
    Lingua::EN::Inflect
+   Storable
 
 COPYRIGHT AND LICENCE
 
