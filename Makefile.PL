@@ -17,28 +17,41 @@ eval q[
 if (defined $Config->{dsn} and not $ARGV[0] =~ /^-s(etup)?$/) {
 
     print qq[
-        For the test suite, we use the database and user info specified
+        For the test suite, we use the database connection info specified
         during the previous run. If you want to change the values, run
         perl Makefile.PL -s.
-        
-        Current values:
-            dsn      = $Config->{dsn}
-            user     = $Config->{user}
-            password = $Config->{password}
     \n];
 
 } else {
 
     print qq[
-        I need some the database info to run the test suite:
+        I need to connect to a database to run the test suite. Please
+        supply the connection information for a MySQL database I can use
+        for testing.
+
+        WARNING: All existing tables in this database will be deleted!
+        
+        Enter "NONE" (without the quotes) to indicate an empty string
+        for a config value.
     \n];
 
     $Config->{dsn} = 'dbi:mysql:test'
         unless defined $Config->{dsn};
-    
-    $Config->{$_} = prompt "The $_ for tests:", $Config->{$_}
-        for qw/dsn user password/;
+
+    for (qw/dsn user password/) {
+        $Config->{$_} = prompt "The $_ for tests:", $Config->{$_};
+        $Config->{$_} = "" if $Config->{$_} eq "NONE";
+    }
 }
+
+
+print qq[        
+        Current values:
+            dsn      = '$Config->{dsn}'
+            user     = '$Config->{user}'
+            password = '$Config->{password}'
+\n];
+
 
 
 mkdir $_, 0700

@@ -2,8 +2,9 @@
 
 use strict;
 # use warnings;
-use Test::More 'no_plan';
+use Test::More;
 use DBI;
+use Data::Dumper;
 
 # $Class::Tables::SQL_DEBUG++;
 
@@ -22,24 +23,37 @@ eval q[
 ## import test data ##
 ######################
 
-my $dbh = DBI->connect( @$Config{qw/dsn user password/} )
-    or "Unable to connect to DB for testing!";
+my $dbh = DBI->connect( @$Config{qw/dsn user password/} );
+
+if (not $dbh) {
+    plan skip_all => "Couldn't connect to the database for testing.\n"
+                   . "Run `perl Makefile.PL -s` to configure the test DB.";
+} elsif ($dbh->{Driver}->{Name} ne "mysql") {
+    $dbh->disconnect;
+    plan skip_all => "A MySQL database is required for Class::Tables";
+} else {
+    plan tests => 44;
+}
+
+my $q = $dbh->prepare("show tables");
+$q->execute;
+while ( my ($table) = $q->fetchrow_array ) {
+    $dbh->do("drop table $table");
+}
+$q->finish;
 
 $dbh->do($_) for (split /\s*;\s*/, <<'END_OF_SQL');
 
-    drop table if exists departments;
     create table departments (
         id            int not null primary key auto_increment,
         name          varchar(50) not null
     );
-    drop table if exists employees;
     create table employees (
         employee_id   int not null primary key auto_increment,
         name          varchar(50) not null unique,
         department_id int not null,
         photo         longblob
     );
-    drop table if exists purchases;
     create table purchases (
         id            int not null primary key auto_increment,
         product_id    int not null,
@@ -47,7 +61,6 @@ $dbh->do($_) for (split /\s*;\s*/, <<'END_OF_SQL');
         quantity      int not null,
         date          date
     );
-    drop table if exists products;
     create table products (
         id            int not null primary key auto_increment,
         name          varchar(50) not null,
@@ -95,7 +108,6 @@ my $timer = times;
 use_ok('Class::Tables');
 Class::Tables->dbh($dbh);
 
-#use Data::Dumper;
 #print Dumper \%Class::Tables::CLASS;
 
 for (qw/Departments Employees Products Purchases/) {
@@ -285,8 +297,6 @@ is( $dump->{purchases}[0]{'product.name'},
     ($h->purchases)[0]->product->name,
     "dump output indirect foreign keys inflated" );
 
-# print Dumper $dept->dump;
-
 ## deleting objects
 
 my $id = $new->id;
@@ -332,16 +342,16 @@ ok( 1,
     "summary: $Class::Tables::SQL_QUERIES queries, ${timer}s" );
 
 ## done!
+
 END {
+    if ($dbh) {
+        $dbh->do($_) for (split /\s*;\s*/, <<'        END_OF_SQL');
+            drop table if exists departments;
+            drop table if exists employees;
+            drop table if exists products;
+            drop table if exists purchases
+        END_OF_SQL
 
-$dbh->do($_) for (split /\s*;\s*/, <<'END_OF_SQL');
-    drop table if exists departments;
-    drop table if exists employees;
-    drop table if exists products;
-    drop table if exists purchases
-END_OF_SQL
-
-$dbh->disconnect;
-
+        $dbh->disconnect;
+    }
 }
-

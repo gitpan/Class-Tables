@@ -1,9 +1,13 @@
 Revision history for Perl extension Class::Tables.
 
+0.25_1	Sun Jan 11 2004
+	- Test suite bugfixes.
+	- Workaround for bizarro behavior with DBI::fetchall_arrayref.
+
 0.24	Sat Jan 10 2004
 	- DBI speedups & misc query optimizations.
 	- Test suite rewrite & cleanup, now get database info for `make test`
-	  from Makefile.PL (the *right* way).
+	  from Makefile.PL (the *right* way (I think)).
 	- Cascading deletes implemented.
 
 0.23	Fri Dec 19 2003

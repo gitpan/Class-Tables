@@ -5,13 +5,13 @@ use strict;
 use warnings;
 use vars qw/$VERSION $DBH $SQL_DEBUG $PLURALIZE $SQL_QUERIES $CASCADE/;
 
-$VERSION   = 0.24;
+$VERSION   = "0.25_1";
 $PLURALIZE = 1;
 $CASCADE   = 1;
 
 ## flyweight data
 
-our ( %CLASS, %OBJ, %TABLE_MAP );
+my ( %CLASS, %OBJ, %TABLE_MAP );
 
 ######################
 ## public interface ##
@@ -33,7 +33,7 @@ sub import {
 }
 
 sub dbh {
-    my (undef, $dbh) = @_;
+    my ($super, $dbh) = @_;
     croak "No DBH given" unless $dbh;
     ($DBH, %CLASS, %OBJ, %TABLE_MAP) = $dbh;
 
@@ -43,7 +43,7 @@ sub dbh {
         ? Lingua::EN::Inflect::PL_N
         : sub { $_[0] };
 
-    _parse_tables();
+    $super->_parse_tables();
 }
 
 #############################
@@ -181,13 +181,11 @@ sub delete {
     my $id_col = $class->_id_col;
 
     if ($CASCADE) {    
-#        my %no_cascade = map { $_ => 1 } @_;
-        my @cascade = # grep { ! $no_cascade{$_} }
-                      grep { $CLASS{$class}{accessors}{$_}{type} eq 'indirect' }
+        my @cascade = grep { $CLASS{$class}{accessors}{$_}{type} eq 'indirect' }
                       keys %{ $CLASS{$class}{accessors} };
         
         for my $accessor (@cascade) {
-            $_->delete for grep ref, $self->$accessor;
+            $_->delete for $self->$accessor;
         }
     }
 
@@ -284,14 +282,28 @@ sub _stubs {
     my $sql    = sprintf "select %s from $table $clause", join "," => @cols;
     my $q      = sql_query($sql, @_);
     
-    while (my $rows = $q->fetchall_arrayref(undef, $MAX_ROWS)) {
-        for (@$rows) {
-            my $id = $_->[0];
-            push @stubs, $class->_mk_stub($id);
-            
-            @{ $OBJ{$class}{$id} }{@cols} = @$_;
-        }
+    $q->execute(@_);
+
+    while (my $rows = $q->fetchrow_arrayref) {
+        my $id = $rows->[0];
+        push @stubs, $class->_mk_stub($id);
+        @{ $OBJ{$class}{$id} }{@cols} = @$rows;
     }
+
+#    for (@{ $q->fetchall_arrayref }) {
+#        my $id = $_->[0];
+#        push @stubs, $class->_mk_stub($id);
+#        @{ $OBJ{$class}{$id} }{@cols} = @$_;
+#    }
+
+#    while (my $rows = $q->fetchall_arrayref(undef, $MAX_ROWS)) {
+#        for (@$rows) {
+#            my $id = $_->[0];
+#            push @stubs, $class->_mk_stub($id);
+#            
+#            @{ $OBJ{$class}{$id} }{@cols} = @$_;
+#        }
+#    }
 
     $q->finish;
     
@@ -304,15 +316,17 @@ sub _stubs {
 ##################
 
 sub _parse_tables {
+    my $super = shift;
     my @tables;
     
-    my $q = sql_query("show tables");
+    my $q = sql_query("show tables")
+        or die "Error listing tables";
     while ( my ($table) = $q->fetchrow_array ) {
         my $class             = _table_to_package_name($table);
         $TABLE_MAP{$table}    = $class;
         $CLASS{$class}{table} = $table;
         
-        _generate_package($class);
+        $super->_generate_package($class);
         push @tables, $table;
     }
     $q->finish;
@@ -320,7 +334,8 @@ sub _parse_tables {
     for my $table (@tables) {
         my $class = $TABLE_MAP{$table};
 
-        $q = sql_query("describe $table");
+        $q = sql_query("describe $table")
+            or die "Error describing table $table";
         while ( my $hr = $q->fetchrow_hashref ) {
             my $col = $hr->{Field};
             my ($field, $type, $ref) = _accessor_type($table, $col);
@@ -397,11 +412,11 @@ sub _table_to_package_name {
 }
 
 sub _generate_package {
-    my $class = shift;
+    my ($super, $class) = @_;
     no strict 'refs';
     
-    unshift @{ "$class\::ISA" }, __PACKAGE__
-        unless UNIVERSAL::isa( $class, __PACKAGE__);
+    unshift @{ "$class\::ISA" }, $super
+        unless UNIVERSAL::isa( $class, $super );
 }
 
 ######################################
@@ -422,6 +437,7 @@ sub sql_query {
         
         $sth = $DBH->prepare_cached($sql);
         $sth->execute(@_);
+
         1;
     } or return undef;
 
@@ -495,16 +511,17 @@ a problem for Class::Tables.
 To use Class::Tables, you need to do no more than this:
 
   use Class::Tables;
-  $dbh = DBI->connect($dsn, $user, $passwd) or die;
+  my $dbh = DBI->connect($dsn, $user, $passwd) or die;
   Class::Tables->dbh($dbh);
 
 Et voila! Class::Tables looks at your table schema and generates two classes,
 C<Departments> and C<Employees>, each with constructor and search class
 methods:
 
-  my $marketing = Departments->new( name => "Marketing" );
-  my @underpaid = Employees->search( salary => 20_000 );
-  my $self      = Employees->fetch($my_id);
+  my $marketing  = Departments->new( name => "Marketing" );
+  my @underpaid  = Employees->search( salary => 20_000 );
+  my @marketeers = Employees->search( department => $marketing );
+  my $self       = Employees->fetch($my_id);
 
 It also generates the following instance methods:
 
@@ -638,9 +655,9 @@ stringify to C<CLASS:ID>.
 =item C<< use Class::Tables $option >>
 
 C<$option> may be either C<'no_cascade'> or C<'cascade'> to disable and
-enable cascading deletes, respectively. See L<delete> below. The default
+enable cascading deletes, respectively. See C<delete> below. The default
 is to enable cascading deletes. If you need to change cascading delete
-behavior on the fly, set C<$Class::Tables::CASCADE>
+behavior on the fly, set C<$Class::Tables::CASCADE>.
 
 =item C<< Class::Tables->dbh($dbh) >>
 
@@ -673,7 +690,7 @@ own cascading delete (to add finer control) very simply:
   package Department;
   sub delete {
       my $self = shift;
-      $_->delete for grep ref, $self->employees;
+      $_->delete for $self->employees;
       $self->SUPER::delete;
   }
 
@@ -692,13 +709,22 @@ set the value of the column, depending if an argument is given.
 For foreign key reference columns, calling the method as an accessor is
 equivalent to a C<fetch> (see below) on the appropriate class, so will return
 the referent object or C<undef> if there is no such object. When called as a
-mutator, the argument may be either an ID or an appropriate object.
+mutator, the argument may be either an ID or an appropriate object:
+
+  ## both are ok:
+  $self->department( $marketing );
+  $self->department( 10 );
 
 For the reverse-mapped foreign key references, the method is readonly, and
 returns a list of objects. It is equivalent to a C<search> (see below) on the
 appropriate class, which means you can also pass additional constraints:
 
+  my @marketeers = $marketing->employees;
+  ## same as Employees->search( department => $marketing );
+
   my @volunteers = $marketing->employees( salary => 0 );
+  ## same as Employees->search( department => $marketing, salary => 0 );
+  
 
 =item C<< $obj->field($field) >> and C<< $obj->field($field, $new_val) >>
 
@@ -711,8 +737,50 @@ saying C<< $obj->$field >> and C<< $obj->$field($new_val) >>.
 Returns a hashref containing the object's attribute data. It recursively
 inflates foreign keys and maps reverse foreign keys to an array reference.
 This is particularly useful for generating structures to pass to
-L<HTML::Template|HTML::Template> and friends. I suggest you use L<Data::Dumper|Data::Dumper>
-on the output of this method to see exactly how it is structured.
+L<HTML::Template|HTML::Template> and friends.
+
+As an example, suppose we also have tables for Purchases and Products, with
+appropriate foreign keys. Then the result of C<dump> on an Employees object
+may look something like this:
+
+  {
+      'name'            => 'John Doe',
+      'id'              => 7,
+      
+      'department.name' => 'Sales',
+      'department.id'   => 4,
+      
+      'purchases'       => [
+          {
+              'date'           => '2002-12-13',
+              'quantity'       => 1,
+              'id'             => 5,
+              
+              'product.id'     => 1,
+              'product.name'   => 'Widgets',
+              'product.price'  => 200,
+              'product.weight' => 10
+          },
+          {
+              'date'           => '2002-12-15',
+              'quantity'       => 2,
+              'id'             => 6,
+              
+              'product.id'     => 3,
+              'product.name'   => 'Foobars',
+              'product.price'  => 150,
+              'product.weight' => 200
+          }
+      ]
+  };
+
+The amount of foreign key inflation is bounded: A foreign key accessor will
+only be followed if its corresponding table hasn't been seen before in the
+dump. This is necessary because, for example, our Purchases objects have a
+foreign key pointing back to the John Doe employee object. But following that
+foreign key would cause an infinite recursion. This means there is no quick
+way to get a list such as C<< $john_doe->department->employees >> from the
+dump, because the employees table would be visited twice.
 
 =back
 
@@ -727,33 +795,36 @@ class methods:
 
 Creates a new object in the database with the given attributes set. If
 successful, returns the object, otherwise returns C<undef>. This is
-semantically equivalent to the following:
+equivalent to the following:
 
   my $obj = Class->new;
   $obj->field1($value1);
   $obj->field2($value2);
   ...
 
-So the values passed may be actual objects where applicable (for foreign
-keys).
+So for foreign key attributes, you may pass an actual object or an ID:
+
+  ## both are ok:
+  Employee->new( department => $marketing );
+  Employee->new( department => 10 );
 
 =item C<< Class->search( field1 => $value1, field2 => $value2, ... ) >>
 
-Searches the appropriate table for objects matching the given restrictions.
+Searches the appropriate table for objects matching the given constraints.
 In list context, returns all objects that matched (or an empty list if no
 objects matched). In scalar context returns only the first object returned
-by the query (or C<undef> if no objects matched). The scalar context query is
-slightly optimized to return only one object.
+by the query (or C<undef> if no objects matched). The scalar context SQL query
+is slightly optimized.
 
-As above, the passed values may be objects where applicable (for foreign
-keys). If no arguments are passed to C<search>, every object in the class is
+As usual, for foreign key attributes, you may pass an actual object or an ID.
+If no arguments are passed to C<search>, every object in the class is
 returned.
 
 =item C<< Class->fetch($id) >>
 
-Semantically equivalent to C<< Class->search( id => $id ) >>, but
-slightly optimized internally. Unlike C<search>, will never return multiple
-items. Returns C<undef> if no object with the given ID exists in the database.
+Equivalent to C<< Class->search( id => $id ) >> in scalar context, but
+slightly optimized internally. Returns the object, or C<undef> if no object
+with the given ID exists in the database.
 
 =back
 
@@ -761,7 +832,7 @@ items. Returns C<undef> if no object with the given ID exists in the database.
 
 Objects in these persistent classes are implemented as lightweight blessed
 scalars in an inside-out mechanism. This has some benefits, mainly that
-concurrency across identical objects is preserved:
+concurrency across identical objects is always preserved:
 
   my $bob1 = Employees->fetch(10);
   my $bob2 = Employees->fetch(10);
@@ -811,13 +882,15 @@ Class::Tables makes strong use of L<Lingua::EN::Inflect|Lingua::EN::Inflect>
 to convert between singular and plural, in an effort to make accessor names
 more meaningful and allow a wide range of column-naming schemes. So when this
 documentation talks about plural and singular nouns, it does not just mean
-"adding an S at the end." You zooligists may have a C<mice> table with a
-corresponding primary/foreign key named C<mouse_id>! Goose, geese, child,
+"adding an S at the end." You zoologists may have a C<mice> table with a
+corresponding primary/foreign key named C<mouse_id>! Goose to geese, child to
 children, etc. The only limitations are what
 L<Lingua::EN::Inflect|Lingua::EN::Inflect> doesn't know about.
 
-I recommend naming tables with a plural noun, as this will make the accessor
-names much more meaningful.
+I recommend naming tables with a plural noun and foreign key columns with a
+singular noun (optionally with the "_id" suffix). This combination makes the
+accessor names much more meaningful, and is (to my knowledge) the most common
+relational naming convention.
 
 If L<Lingua::EN::Inflect|Lingua::EN::Inflect> is not available on your system,
 Class::Tables will still work fine, but without the distinction between
