@@ -81,6 +81,7 @@ WriteMakefile(
     PREREQ_PM     => { DBI => 0,
                        Carp => 0,
                        overload => 0,
+                       Storable => 0,
                        "Lingua::EN::Inflect" => 0 },
     clean         => { FILES => "testconfig" },
     ABSTRACT_FROM => 'lib/Class/Tables.pm',

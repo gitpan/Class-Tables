@@ -1,17 +1,18 @@
 package Class::Tables;
 
 use Carp;
+use Storable qw/retrieve nstore/;
 use strict;
 use warnings;
 use vars qw/$VERSION $DBH $DB_DRIVER $SQL_DEBUG $INFLECT $SQL_QUERIES $CASCADE/;
 
-$VERSION = "0.27";
+$VERSION = "0.28_1";
 $INFLECT = 1;
 $CASCADE = 1;
 
 ## flyweight data
 
-my ( %CLASS, %OBJ, %TABLE_MAP );
+my ( %CLASS, %OBJ, %TABLE_MAP, $SCHEMA_CACHE );
 
 ######################
 ## public interface ##
@@ -20,8 +21,9 @@ my ( %CLASS, %OBJ, %TABLE_MAP );
 sub import {
     my ($class, %args) = @_;
     
-    $CASCADE = $args{cascade} if exists $args{cascade};
-    $INFLECT = $args{inflect} if exists $args{inflect};
+    $CASCADE      = $args{cascade} if exists $args{cascade};
+    $INFLECT      = $args{inflect} if exists $args{inflect};
+    $SCHEMA_CACHE = $args{cache}   if exists $args{cache};
 }
 
 sub dbh {
@@ -33,17 +35,6 @@ sub dbh {
 
     eval "use $DB_DRIVER; 1;"
         or croak "$dbh->{Driver}{Name} is an unsupported database driver";
-
-    no strict qw/refs subs/;
-    
-    *plural_cmp = ($INFLECT && eval "use Lingua::EN::Inflect; 1")
-        ? sub {
-              !! ( Lingua::EN::Inflect::PL_N_eq(@_) =~ /^(?:s:p|eq)$/ );
-          }
-        : sub {
-              my ($x, $y) = @_;
-              !! ( $x eq ($y . "s") or $x eq $y );
-          };
 
     $super->_parse_tables();
 }
@@ -94,9 +85,10 @@ sub new {
                 
     sql_do($sql, @binds) or return undef;
     
+#    my $id = $DBH->last_insert_id(undef, undef, $table, $class->_id_col)
     my $id = $DB_DRIVER->insert_id($DBH, $table, $class->_id_col)
         or die "Couldn't get last insert id";
-    
+     
     my $obj = $class->_mk_obj($id);
     @{ $OBJ{$class}{$id} }{@cols} = @binds;
     
@@ -138,6 +130,9 @@ sub field {
     my $class  = ref $self;
     my $table  = $class->_table;
     my $id_col = $class->_id_col;
+    
+    return keys %{ $CLASS{$class}{accessors} }
+        unless defined $field;
 
     croak qq{Can't locate accessor "$field" via package "$class"}
         unless exists $CLASS{$class}{accessors}{$field};
@@ -262,10 +257,6 @@ sub dump {
 ## private class methods ##
 ###########################
 
-sub _where_id {
-    "where " . join " and " => map { "$_=?" } $_[0]->_id_col;
-}
-
 sub _table     { $CLASS{ $_[0] }{table}; }
 sub _load_cols { @{ $CLASS{ $_[0] }{load_cols} }; }
 sub _id_col    { $CLASS{ $_[0] }{id_col}; }
@@ -278,8 +269,6 @@ sub _mk_obj {
     $CLASS{$class}{obj_count}{$id}++;
     return bless \$id, $class;
 }
-
-my $MAX_ROWS = 5_000;
 
 sub _get_objs {
     my $class  = shift;
@@ -310,6 +299,30 @@ sub _get_objs {
 
 sub _parse_tables {
     my $super = shift;
+
+    my ($CACHE, $signature);
+    
+    if ($SCHEMA_CACHE) {
+        $signature = join "\x0" =>
+                         $DBH->{Name}, $DBH->{Driver}{Name}, $INFLECT;
+                     
+        $CACHE = eval { retrieve $SCHEMA_CACHE };
+        
+        if (exists $CACHE->{$signature}) {
+            %CLASS     = %{ $CACHE->{$signature}{CLASS} };
+            %TABLE_MAP = %{ $CACHE->{$signature}{TABLE_MAP} };
+            return;
+        }
+    }
+
+    {
+        my %memoize;
+    
+        no strict qw/refs subs/;
+        *plural = ($INFLECT && eval "use Lingua::EN::Inflect; 1")
+            ? sub { $memoize{$_[0]} ||= Lingua::EN::Inflect::PL_N(@_) }
+            : sub { $_[0] . "s" };
+    }
 
     my %map = %{ $DB_DRIVER->map_tables($DBH) };
 
@@ -375,7 +388,14 @@ sub _parse_tables {
         }
 
     }
-
+    
+    
+    if ($SCHEMA_CACHE) {
+        $CACHE->{$signature}{CLASS}     = \%CLASS;
+        $CACHE->{$signature}{TABLE_MAP} = \%TABLE_MAP;
+        nstore $CACHE, $SCHEMA_CACHE;
+    }
+    
 }
 
 #####
@@ -398,7 +418,7 @@ sub _accessor_type {
         my $pre  = substr($col, 0, pos($col) - 1);
         my $post = substr($col, pos $col);
         
-        if (plural_cmp($pre, $table)) {
+        if ($table eq $pre or $table eq plural($pre)) {
             $name = $col = $post;
             last;
         }
@@ -406,17 +426,14 @@ sub _accessor_type {
     
     $col =~ s/_id$//;
     
-    if ( $col eq "id" ) { # or ($col =~ s/_id$// and plural_cmp($col, $table)) ) {
+    if ( $col eq "id" ) {
         $name = $type = 'id';
     }
     
-    for my $t (keys %TABLE_MAP) {
-        if (plural_cmp($col, $t)) {
-            $name = $col;
-            $type = "1-to-1";
-            $ref  = $t;
-            last;
-        }
+    if ( exists $TABLE_MAP{$col} or exists $TABLE_MAP{plural($col)} ) {
+        $name = $col;
+        $type = "1-to-1";
+        $ref  = exists $TABLE_MAP{$col} ? $col : plural($col);
     }
                 
     return ($name, $type, $ref);
@@ -687,17 +704,38 @@ stringify to C<CLASS:ID>.
 
 =item C<< use Class::Tables %args >>
 
-Valid argument keys are C<'cascade'> and C<'inflect'>, to control cascading
-deletes and use of L<Lingua::EN::Inflect|Lingua::EN::Inflect> for plural &
-singular nouns, respectively. Use a boolean value to enable or disable the
-feature. The default behavior is:
+Valid argument keys are:
 
-  use Class::Tables cascade => 1, inflect => 1;
+=over
 
-See L<Plural And Singular Nouns> for more information on noun pluralization.
+=item cascade
 
-See C<delete> below for information on cascading deletes. If you need to
-change cascading delete behavior on the fly, set C<$Class::Tables::CASCADE>.
+Takes a boolean value indicating whether to perform cascading deletes. See
+C<delete> below for information on cascading deletes. If you need to change
+cascading delete behavior on the fly, localize C<$Class::Tables::CASCADE>.
+
+=item inflect
+
+Takes a boolean value indicating whether to use
+L<Lingua::EN::Inflect|Lingua::EN::Inflect> for plural & singular nouns. See
+L<Plural And Singular Nouns> for more information on noun pluralization.
+
+=item cache
+
+Takes a filename argument of a schema cache. This speeds up slow databases and
+large schemas. It uses L<Storable|Storable> to save the results of the schema
+mapping, and on each subsequent execution, uses the cache to keep from doing
+the mapping again. If your database's schema changes, simply empty the cache
+file to force a re-mapping.
+
+You can omit this arg or pass a false value to disable this feature.
+
+=back
+
+The default behavior is:
+
+  use Class::Tables cascade => 1, inflect => 1, cache => undef;
+
 
 =item C<< Class::Tables->dbh($dbh) >>
 
@@ -775,6 +813,16 @@ treated with C<s/^employees?_//> before consideration.
 This is an alternative syntax to accessors/mutators. When C<$field> is the
 name of a valid accessor/mutator method for the object, this is equivalent to
 saying C<< $obj->$field >> and C<< $obj->$field($new_val) >>.
+
+=item C<< $obj->field >>
+
+With no arguments, the C<field> accessor returns a list of all the data
+accessors for that type of object. It's the same idea as CGI's C<param> method
+with no arguments.
+
+  for my $accessor ($obj->field) {
+      printf "$accessor : %s\n", scalar $obj->$accessor;
+  }
 
 =item C<< $obj->dump >>
 

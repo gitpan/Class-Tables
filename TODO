@@ -1,6 +1,23 @@
 Forgive the format (or lack thereof) of this file, as it's mostly a
 stream-of-consciousness hodge-podge of random ideas.
 
+MISC
+
+Return dummy object on failure (a la DBIx::Simple) so that
+
+  $bob->department->name
+
+doesn't croak even if Bob doesn't have a department..
+
+Iterators for one-to-many? Unlikely...
+
+
+DEBUG
+
+  Class::Tables->dump;
+
+to dump the class definitions
+
 
 CLASS::DBI
 

@@ -43,9 +43,9 @@ eval q[
 ###################
 
 if ($Config->{dsn} =~ /^skip$/i) {
-    plan skip_all => "User has skipped the test suite.\n"
-                   . "Run `perl Makefile.PL -s` to reconfigure the connection "
-                   . "parameters\nfor the test database.";
+    plan skip_all => "User has skipped the test suite. Run `perl Makefile.PL "
+                   . "-s` to reconfigure the connection parameters for the "
+		   . "test database.";
 }
 
 my $dbh = eval {
@@ -54,21 +54,22 @@ my $dbh = eval {
 };
 
 if (not $dbh) {
-    plan skip_all => "Couldn't connect to the database for testing.\n"
-                   . "Run `perl Makefile.PL -s` to reconfigure the connection "
-                   . "parameters\nfor the test database.";
+    plan skip_all => "Couldn't connect to the database for testing. Run `perl "
+                   . "Makefile.PL -s` to reconfigure the connection parameters "
+		   . "for the test database.";
 
 } elsif ( ! $drivers{ $dbh->{Driver}{Name} } ) {
     $dbh->disconnect;
-    plan skip_all => "Your database driver is not supported. (supported: "
-                   . join(" " => sort keys %drivers) . ")\n"
-                   . "Run `perl Makefile.PL -s` to reconfigure the connection "
-                   . "parameters\nfor the test database.";
+    my $drivers = join " " => sort keys %drivers;
+    
+    plan skip_all => "Your database driver is not supported (supported: "
+                   . "$drivers). Run `perl Makefile.PL -s` to reconfigure "
+		   . "the connection parameters for the test database.";
 
 } else {
     plan tests => 67;
-    print "# Starting test suite. Run `perl Makefile.PL -s` to reconfigure\n"
-            . "# connection parameters for the test database.\n";
+    diag "Starting test suite. Run `perl Makefile.PL -s` to reconfigure "
+       . "connection parameters for the test database.";
 }
 
 ## clear all tables first
@@ -78,7 +79,7 @@ my $driver = $dbh->{Driver}{Name};
 my $q = $dbh->prepare( $drivers{$driver}{show} );
 $q->execute;
 while ( my ($table) = $q->fetchrow_array ) {
-    print "DROPPING $table\n";
+    diag "DROPPING $table";
     $dbh->do("drop table $table");
 }
 $q->finish;
@@ -323,8 +324,19 @@ my %simple_accessors = (
     }
 );
 
+my $field_ok = 1;
+
 for my $class (keys %simple_accessors) {
     my $obj = $class->fetch(1);
+
+    my @supposed_accessors = $obj->field;
+
+    @supposed_accessors == @{[ keys %{ $simple_accessors{$class} } ]}
+        or $field_ok = 0;
+
+    for (@supposed_accessors) {
+        exists $simple_accessors{$class}{$_} or $field_ok = 0;
+    }
 
     for my $accessor (keys %{ $simple_accessors{$class} }) {
         is( ref $obj->$accessor,
@@ -332,6 +344,9 @@ for my $class (keys %simple_accessors) {
             "correct $class\->$accessor accessor" );
     }
 }
+
+ok( $field_ok,
+    "field() accessor with no args" );
 
 ####
 
@@ -519,8 +534,7 @@ isnt(
 ## done!
 
 $timer = times - $timer;
-ok( 1,
-    "summary: $Class::Tables::SQL_QUERIES queries, ${timer}s ($driver)" );
+diag "SUMMARY: $Class::Tables::SQL_QUERIES queries, ${timer}s ($driver)";
 
 #############
 ## cleanup ##
