@@ -9,43 +9,15 @@ Find out if test suite gets the DSN info in the "correct" way. Could it
 come from Makefile.PL instead?
 
 
+MANY-TO-MANY
 
-DUMP METHOD
-
-Since the dump method dumps foreign keys into a hashref, how could we
-get that to work better with HTML::Template? As it is now, $emp->dump
-looks something like this:
-
-  {
-    id         => 3,
-    name       => "Bob",
-    department => { id => 7, name => "Marketing", employee => [ ... ] },
-    purchase   => [ ... ],
-    iq         => 60,
-  }
-
-HTML::Template can't get to $dump->{department}{name}. One thing we could
-do, though, is this:
-
-  {
-    id                    => 3
-    name                  => "Bob",
-    'department.id'       => 7,
-    'department.name'     => "Marketing",
-    'department.employee' => [ ... ],
-    purchase              => [ ... ],
-    iq                    => 60
-  }
-
-However, we might have an arbitrarily long chain of foreign keys to 
-inflate in this way, it could get out of hand..
+In a many-to-many mapping table, the additional primary key column
+shouldn't be required. We can detect such a table when there is no primary
+key detected, yet 2 or more foreign keys. To pull this off, we'll need
+infrastructure for multiple-key tables.
 
 
-
-INDIRECT FOREIGN KEYS
-
-Allow pluralizing names of reverse foreign keys (using Lingua::*??), i.e,
-instead of $department->employee, also allow $department->employees
+MANY-TO-MANY
 
 Perhaps in scalar context, a reverse foreign key should return a special
 collection object that knows the IDs of all the objects.. That way we can

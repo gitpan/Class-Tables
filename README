@@ -16,6 +16,8 @@ This module requires these other modules and libraries:
 
    Carp
    DBI
+   DBD::mysql
+   Lingua::EN::Inflect
 
 COPYRIGHT AND LICENCE
 

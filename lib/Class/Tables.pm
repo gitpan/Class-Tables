@@ -3,18 +3,34 @@ package Class::Tables;
 use Carp;
 use strict;
 use warnings;
-use vars qw/$VERSION $DBH $SQL_DEBUG $PLURALIZE $SQL_QUERIES/;
+use vars qw/$VERSION $DBH $SQL_DEBUG $PLURALIZE $SQL_QUERIES $CASCADE/;
 
-$VERSION   = 0.23;
+$VERSION   = 0.24;
 $PLURALIZE = 1;
+$CASCADE   = 1;
 
 ## flyweight data
 
-my ( %CLASS, %OBJ, %TABLE_MAP );
+our ( %CLASS, %OBJ, %TABLE_MAP );
 
 ######################
 ## public interface ##
 ######################
+
+sub import {
+    my $class = shift;
+    for (@_) {
+        if (/^no_cascade$/) {
+            $CASCADE = 0;
+            next;
+        } elsif (/^cascade$/) {
+            $CASCADE = 1;
+            next;
+        } else {
+            croak "Unknown parameter for 'use $class' : $_\n";
+        }
+    }
+}
 
 sub dbh {
     my (undef, $dbh) = @_;
@@ -36,67 +52,49 @@ sub dbh {
 
 sub fetch {
     my ($class, $id) = @_;
-    my $table  = $class->_table;
     my $id_col = $class->_id_col;
     
-    Carp::longmess unless $id;
+    if (exists $OBJ{$class}{$id}) {
+        $CLASS{$class}{stub_count}{$id}++;
+        return bless \$id, $class;
+    }
     
-    return undef
-        unless exists $OBJ{$class}{$id}
-        or sql_do("select 1 from $table where $id_col=?", $id);
-    
-    my $obj = $class->_mk_stub($id);
-    
-    $class->_fill_stubs($obj);
-
-    return $obj;
+    return scalar $class->_stubs("where $id_col=?", $id);
 }
-
-## I'm not 100% happy with the @binds, to get object ids by just checking
-## with ref(). But it should work fine unless you pass a hash ref or
-## something else that has no earthly place in an sql search.
 
 sub search {
     my ($class, %params) = @_;
-    my $table  = $class->_table;
-    my $id_col = $class->_id_col;
+    
+    return unless defined wantarray;
     
     my @fields = grep { exists $CLASS{$class}{accessors}{$_} } keys %params;
-    my @binds  = map { ref $_ ? $_->id : $_ } @params{@fields};
+    my @binds  = map { UNIVERSAL::can($_, 'id') ? $_->id : $_ } @params{@fields};
     my @cols   = map { $CLASS{$class}{accessors}{$_}{col} } @fields;
+
+    my $clause = @cols
+        ? "where " . join(" and " => map "$_=?", @cols)
+        : "";
+    $clause .= " order by " . $class->_order_by;
+    $clause .= " limit 1" unless wantarray;
     
-    my $sql   = sprintf "select $id_col from $table %s %s order by %s %s",
-                    (@cols ? "where" : ""),
-                    join( " and " => map { "$_=?" } @cols ),
-                    $class->_order_by,
-                    (wantarray ? "" : "limit 1");
-
-    my $q     = sql_query($sql, @binds);
-    my @stubs = map { $class->_mk_stub( $_->[0] ) }
-                @{ $q->fetchall_arrayref };
-    $q->finish;
-   
-    $class->_fill_stubs(@stubs);
-
-    return wantarray ? @stubs : $stubs[0];
+    return $class->_stubs($clause, @binds);
 }
 
 sub new {
     my ($class, %params) = @_;
     $params{id} = undef;
 
-    my $table  = $class->_table;
     my @fields = grep { exists $CLASS{$class}{accessors}{$_} } keys %params;
-    my @binds  = map { ref $_ ? $_->id : $_ } @params{@fields};
+    my @binds  = map { UNIVERSAL::can($_, 'id') ? $_->id : $_ } @params{@fields};
     my @cols   = map { $CLASS{$class}{accessors}{$_}{col} } @fields;
-    
+
+    my $table  = $class->_table;
     my $sql    = "insert into $table set " . join("," => map { "$_=?" } @cols);
                 
     sql_do($sql, @binds) or return undef;
     
     my $id  = sql_insertid();
     my $obj = $class->_mk_stub($id);
-    
     @{ $OBJ{$class}{$id} }{@cols} = @binds;
     
     return $obj;
@@ -106,9 +104,7 @@ sub new {
 ## inherited object methods ##
 ##############################
 
-sub id {
-    ${ $_[0] };
-}
+sub id { ${ $_[0] }  }
 
 sub DESTROY {
     my $self  = shift;
@@ -124,7 +120,7 @@ sub AUTOLOAD {
     (my $func = $Class::Tables::AUTOLOAD) =~ s/.*:://;
     
     croak qq{Can't locate object method "$func" via package "$self"}
-        unless ref $self and UNIVERSAL::isa( $self, __PACKAGE__ );
+        unless ref $self and UNIVERSAL::isa( $self, "Class::Tables" );
 
     unshift @_, $self, $func;
     goto &field;
@@ -153,29 +149,29 @@ sub field {
             sql_do("select $col from $table where $id_col=?", $id)
         if not exists $OBJ{$class}{$id}{$col};
 
-    ## save some typing
-    my $data = \$OBJ{$class}{$id}{$col};
-
     if ( $type eq 'direct' ) {
         if (@_) {
-            my $ref_id = ref $_[0] ? $_[0]->id : $_[0];
+            my $ref_id = UNIVERSAL::can($_[0], 'id') ? $_[0]->id : $_[0];
+            
             sql_do("update $table set $col=? where $id_col=?", $ref_id, $id)
-                and $$data = shift;
+                and $OBJ{$class}{$id}{$col} = $ref_id;
         }
-
+        
         ## inflate keys
-        $$data = $TABLE_MAP{$ref}->fetch( $$data ) unless ref $$data;
+        return unless defined wantarray;
+        
+        return $TABLE_MAP{$ref}->fetch( $OBJ{$class}{$id}{$col} )
+            if defined $OBJ{$class}{$id}{$col};
 
     } elsif ( $type eq 'normal' ) {
         if (@_) {
             sql_do("update $table set $col=? where $id_col=?", $_[0], $id)
-                and $$data = shift;
+                and $OBJ{$class}{$id}{$col} = shift;
         }
     }
 
-    return $$data;
+    return $OBJ{$class}{$id}{$col};
 }
-
 
 sub delete {
     my $self   = shift;
@@ -183,22 +179,34 @@ sub delete {
     my $class  = ref $self;
     my $table  = $class->_table;
     my $id_col = $class->_id_col;
-    
+
+    if ($CASCADE) {    
+#        my %no_cascade = map { $_ => 1 } @_;
+        my @cascade = # grep { ! $no_cascade{$_} }
+                      grep { $CLASS{$class}{accessors}{$_}{type} eq 'indirect' }
+                      keys %{ $CLASS{$class}{accessors} };
+        
+        for my $accessor (@cascade) {
+            $_->delete for grep ref, $self->$accessor;
+        }
+    }
+
     sql_do("delete from $table where $id_col=?", $id);
     delete $OBJ{$class}{$id};
     
-    ## fixme? cascade to remove *all* stub occurences from %OBJ_DATA
-    ## (as in foreign key refs)
 }
 
-use overload '""' => sub {
-    my $self  = shift;
-    my $class   = ref $self;
-
-    return exists $CLASS{$class}{accessors}{'name'}
-        ? $self->name
-        : $class . ":" . $self->id;
-};
+use overload
+    fallback => 1,
+    '""' => sub {
+        my $self  = shift;
+        my $class = ref $self;
+    
+        return exists $CLASS{$class}{accessors}{'name'}
+            ? $self->name
+            : $class . ":" . $self->id;
+    },
+    'bool' => sub { 1 };
 
 ###################################
 ## play nice with HTML::Template ##
@@ -243,10 +251,6 @@ sub dump {
     } @fields;
 
     $h{id} = $self->id;
-    
-#    $h{$_} = $h{ $CLASS{$class}{accessors}{$_}{ref} }
-#        for grep { $CLASS{$class}{accessors}{$_}{type} eq 'alias' }
-#            keys %{ $CLASS{$class}{accessors} };
 
     return \%h;
 }
@@ -255,37 +259,43 @@ sub dump {
 ## private class methods ##
 ###########################
 
-sub _mk_stub {
-    my ($class, $id) = @_;
-    $CLASS{$class}{stub_count}{$id}++;
-    bless \$id, $class;
-}
-
 sub _table     { $CLASS{ $_[0] }{table}; }
 sub _load_cols { @{ $CLASS{ $_[0] }{load_cols} }; }
 sub _id_col    { $CLASS{ $_[0] }{id_col}; }
 sub _accessors { keys %{ $CLASS{ $_[0] }{accessors} }; }
 sub _order_by  { $CLASS{ $_[0] }{order_by} ||= $_[0]->_id_col; }
 
-sub _fill_stubs {
+sub _mk_stub {
+    my ($class, $id) = @_;
+    $CLASS{$class}{stub_count}{$id}++;
+    return bless \$id, $class;
+}
+
+my $MAX_ROWS = 5_000;
+
+sub _stubs {
     my $class  = shift;
+    my $clause = shift;
     my $id_col = $class->_id_col;
     my $table  = $class->_table;
+    my @stubs;
+    my @cols   = ($id_col, $class->_load_cols);
     
-    my @empty_stub_ids = grep { not exists $OBJ{$class}{$_} }
-                         map  { $_->id } @_;
-
-    return unless @empty_stub_ids;                         
-                      
-    my $sql = sprintf "select %s from $table where $id_col in (%s)",
-                  join( "," => $id_col, $class->_load_cols ),
-                  join( "," => ("?") x @empty_stub_ids );
-              
-    my $q = sql_query($sql, @empty_stub_ids);
-    while ( my $hr = $q->fetchrow_hashref ) {
-        $OBJ{$class}{ $hr->{$id_col} } = { %$hr };
+    my $sql    = sprintf "select %s from $table $clause", join "," => @cols;
+    my $q      = sql_query($sql, @_);
+    
+    while (my $rows = $q->fetchall_arrayref(undef, $MAX_ROWS)) {
+        for (@$rows) {
+            my $id = $_->[0];
+            push @stubs, $class->_mk_stub($id);
+            
+            @{ $OBJ{$class}{$id} }{@cols} = @$_;
+        }
     }
+
     $q->finish;
+    
+    return wantarray ? @stubs : $stubs[0];
 }
 
 
@@ -314,14 +324,14 @@ sub _parse_tables {
         while ( my $hr = $q->fetchrow_hashref ) {
             my $col = $hr->{Field};
             my ($field, $type, $ref) = _accessor_type($table, $col);
-			
-			$CLASS{$class}{id_col} = $col, next if $type eq 'id';
             
             $CLASS{$class}{accessors}{$field} = {
                 col  => $col,
                 type => $type,
                 ref  => $ref,
             };
+
+            $CLASS{$class}{id_col} = $col, next if $type eq 'id';
 
             ## reverse-map the direct foreign keys
             if ($type eq 'direct') {
@@ -336,7 +346,7 @@ sub _parse_tables {
             push @{ $CLASS{$class}{load_cols} }, $col
                 if $hr->{Type} !~ /blob|text/;
                 
-            $CLASS{$class}{order_by}   ||= $col;
+            $CLASS{$class}{order_by} ||= $col;
         }
         $q->finish;
         
@@ -401,12 +411,9 @@ sub _generate_package {
 sub sql_query {
     confess "No DBH supplied" unless $DBH;
     my $sql = shift;
-	my $sth;
+    my $sth;
 
     eval {
-        ## why won't putting these attribs in prepare_cached($sql, { ... })
-        ## work correctly??
-        
         local $DBH->{RaiseError} = 1;
         local $DBH->{PrintError} = 0;
         
@@ -628,6 +635,13 @@ stringify to C<CLASS:ID>.
 
 =over
 
+=item C<< use Class::Tables $option >>
+
+C<$option> may be either C<'no_cascade'> or C<'cascade'> to disable and
+enable cascading deletes, respectively. See L<delete> below. The default
+is to enable cascading deletes. If you need to change cascading delete
+behavior on the fly, set C<$Class::Tables::CASCADE>
+
 =item C<< Class::Tables->dbh($dbh) >>
 
 You must pass Class::Tables an active database handle before you can use any
@@ -649,6 +663,25 @@ This readonly accessor returns the primary key of the object.
 
 Removes the object from the database. The behavior of further method calls on
 the object are undefined.
+
+If cascading deletes are enabled, then all other objects in the database that
+have foreign keys pointing to C<$obj> are deleted as well, and so on. Cyclic
+references are not handled gracefully, so if you have a complicated
+database structure, you should disable cascading deletes. You can roll your
+own cascading delete (to add finer control) very simply:
+
+  package Department;
+  sub delete {
+      my $self = shift;
+      $_->delete for grep ref, $self->employees;
+      $self->SUPER::delete;
+  }
+
+It's important to point out that in this process, if an object looses all
+foreign key references to it, it is not deleted. For example, if all
+Employees in a certain department are deleted, the department object is not
+automatically deleted. If you want this behavior, you must add it yourself
+in the Employees::delete method.
 
 =item C<< $obj->attrib >> and C<< $obj->attrib($new_val) >>
 
@@ -744,14 +777,20 @@ concurrency across identical objects is preserved:
 
 You can still override/augment object methods if you need to with C<SUPER::>
 
-  ## dumb example
+  ## Suppose the "last_seen" column in a "users" table was a
+  ## YYYYMMDDHHMMSS timestamp column. We could override the last_seen
+  ## method to return a Time::Piece object, and accept one when used
+  ## as a mutator:
   
-  package Employees;
-  sub ssn {
+  package Users;
+  my $date_fmt = "%Y%m%d%H%M%S";
+  sub last_seen {
       my $self = shift;
-      my $ssn = $self->SUPER::ssn(@_);
-      $ssn =~ s/(\d\d\d)(\d\d)(\d\d\d\d)/$1-$2-$3/;
-      return $ssn;
+      my $ret  = @_
+        ? $self->SUPER::last_seen( $_[0]->strftime($date_fmt) );
+        : $self->SUPER::last_seen;
+  
+      Time::Piece->strptime($ret, $date_fmt);
   }
 
 But since these objects are implemented as blessed scalars, you have to use
@@ -759,11 +798,11 @@ some sort of inside-out mechanism to store extra (non-persistent) subclass
 attributes with the objects:
 
   package Employees;
-  my %flag;
-  sub flag {
+  my %foo;
+  sub foo {
       my $self = shift;
-      @_ ? $flag{$self} = shift
-         : $flag{$self};
+      @_ ? $foo{ $self->id } = shift
+         : $foo{ $self->id };
   }
 
 =head2 Plural And Singular Nouns
@@ -772,10 +811,10 @@ Class::Tables makes strong use of L<Lingua::EN::Inflect|Lingua::EN::Inflect>
 to convert between singular and plural, in an effort to make accessor names
 more meaningful and allow a wide range of column-naming schemes. So when this
 documentation talks about plural and singular nouns, it does not just mean
-"adding an S at the end." You zooligists may have a C<mice> table with primary
-key column properly detected as C<mouse_id>! Goose, geese, child, children,
-etc. The only limitations are what L<Lingua::EN::Inflect|Lingua::EN::Inflect>
-doesn't know about.
+"adding an S at the end." You zooligists may have a C<mice> table with a
+corresponding primary/foreign key named C<mouse_id>! Goose, geese, child,
+children, etc. The only limitations are what
+L<Lingua::EN::Inflect|Lingua::EN::Inflect> doesn't know about.
 
 I recommend naming tables with a plural noun, as this will make the accessor
 names much more meaningful.
