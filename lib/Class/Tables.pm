@@ -3,11 +3,14 @@ package Class::Tables;
 use Carp;
 use strict;
 use warnings;
-use vars qw/$AUTOLOAD $VERSION/;
+use vars qw/$VERSION $DBH $SQL_DEBUG $PLURALIZE $SQL_QUERIES/;
 
-$VERSION = 0.22;
+$VERSION   = 0.23;
+$PLURALIZE = 1;
 
-our (%CLASS_INFO, %OBJ_DATA, %TABLE_MAP, %TABLE_INFO, %STUB_COUNT, $DBH);
+## flyweight data
+
+my ( %CLASS, %OBJ, %TABLE_MAP );
 
 ######################
 ## public interface ##
@@ -16,8 +19,14 @@ our (%CLASS_INFO, %OBJ_DATA, %TABLE_MAP, %TABLE_INFO, %STUB_COUNT, $DBH);
 sub dbh {
     my (undef, $dbh) = @_;
     croak "No DBH given" unless $dbh;
-    $DBH = $dbh;
-    %CLASS_INFO = %OBJ_DATA = %TABLE_MAP = %TABLE_INFO = ();
+    ($DBH, %CLASS, %OBJ, %TABLE_MAP) = $dbh;
+
+    no strict qw/refs subs/;
+    
+    *PL_N = ($PLURALIZE && eval "use Lingua::EN::Inflect; 1")
+        ? Lingua::EN::Inflect::PL_N
+        : sub { $_[0] };
+
     _parse_tables();
 }
 
@@ -26,15 +35,19 @@ sub dbh {
 #############################
 
 sub fetch {
-    my ($pkg, $id) = @_;
-    my $table = $pkg->_table_name;
+    my ($class, $id) = @_;
+    my $table  = $class->_table;
+    my $id_col = $class->_id_col;
+    
+    Carp::longmess unless $id;
     
     return undef
-        unless exists $OBJ_DATA{$pkg}{$id}
-        or     sql_do("select 1 from $table where id=?", $id);
+        unless exists $OBJ{$class}{$id}
+        or sql_do("select 1 from $table where $id_col=?", $id);
     
-    my $obj = $pkg->_stub($id);
-    $pkg->_fill_stubs($obj);
+    my $obj = $class->_mk_stub($id);
+    
+    $class->_fill_stubs($obj);
 
     return $obj;
 }
@@ -44,44 +57,47 @@ sub fetch {
 ## something else that has no earthly place in an sql search.
 
 sub search {
-    my ($pkg, %clauses) = @_;
-    my $table = $pkg->_table_name;
-    my @cols  = grep { exists $TABLE_MAP{$table}{$_} } keys %clauses;
-    my @binds = map { ref $_ ? $_->id : $_ } @clauses{@cols};
-    my $sql   = sprintf( "select id from $table %s %s order by %s %s",
+    my ($class, %params) = @_;
+    my $table  = $class->_table;
+    my $id_col = $class->_id_col;
+    
+    my @fields = grep { exists $CLASS{$class}{accessors}{$_} } keys %params;
+    my @binds  = map { ref $_ ? $_->id : $_ } @params{@fields};
+    my @cols   = map { $CLASS{$class}{accessors}{$_}{col} } @fields;
+    
+    my $sql   = sprintf "select $id_col from $table %s %s order by %s %s",
                     (@cols ? "where" : ""),
                     join( " and " => map { "$_=?" } @cols ),
-                    ($TABLE_INFO{$table}{order_by} ||= 'id'),
-                    (wantarray ? "" : "limit 1")
-                );
+                    $class->_order_by,
+                    (wantarray ? "" : "limit 1");
 
-    my $q = sql_query($sql, @binds);
-    
-    my @stubs = map { $pkg->_stub($_->[0]) } @{ $q->fetchall_arrayref };
+    my $q     = sql_query($sql, @binds);
+    my @stubs = map { $class->_mk_stub( $_->[0] ) }
+                @{ $q->fetchall_arrayref };
     $q->finish;
    
-    $pkg->_fill_stubs(@stubs);
+    $class->_fill_stubs(@stubs);
 
     return wantarray ? @stubs : $stubs[0];
 }
 
 sub new {
-    my ($pkg, %params) = @_;
+    my ($class, %params) = @_;
     $params{id} = undef;
+
+    my $table  = $class->_table;
+    my @fields = grep { exists $CLASS{$class}{accessors}{$_} } keys %params;
+    my @binds  = map { ref $_ ? $_->id : $_ } @params{@fields};
+    my @cols   = map { $CLASS{$class}{accessors}{$_}{col} } @fields;
     
-    my $table = $pkg->_table_name;
-    my @cols  = grep { $_ ne 'id' and exists $TABLE_MAP{$table}{$_} }
-                keys %params;
-    my @binds = @params{@cols};
-    my $sql   = sprintf( "insert into $table set %s",
-                    join( "," => map { "$_=?" } @cols )
-                );
+    my $sql    = "insert into $table set " . join("," => map { "$_=?" } @cols);
                 
     sql_do($sql, @binds) or return undef;
     
     my $id  = sql_insertid();
-    my $obj = $pkg->_stub($id);
-    @{ $OBJ_DATA{$pkg}{$id} }{@cols} = @binds;
+    my $obj = $class->_mk_stub($id);
+    
+    @{ $OBJ{$class}{$id} }{@cols} = @binds;
     
     return $obj;
 }
@@ -95,19 +111,19 @@ sub id {
 }
 
 sub DESTROY {
-    my $self = shift;
-    my $pkg  = ref $self;
-    my $id   = $self->id;
+    my $self  = shift;
+    my $class = ref $self;
+    my $id    = $self->id;
 
-    delete $OBJ_DATA{$pkg}{$id}
-        unless --$STUB_COUNT{$pkg}{$id};
+    delete $OBJ{$class}{$id}
+        unless --$CLASS{$class}{stub_count}{$id};
 }
 
 sub AUTOLOAD {
     my $self = shift;
-    (my $func = $AUTOLOAD) =~ s/.*:://;
+    (my $func = $Class::Tables::AUTOLOAD) =~ s/.*:://;
     
-    croak "Method call not found: $AUTOLOAD"
+    croak qq{Can't locate object method "$func" via package "$self"}
         unless ref $self and UNIVERSAL::isa( $self, __PACKAGE__ );
 
     unshift @_, $self, $func;
@@ -115,68 +131,61 @@ sub AUTOLOAD {
 }
 
 sub field {
-    my $self  = shift;
-    my $field = shift;
-    my $id    = $self->id;
-    my $pkg   = ref $self;
-    my $table = $pkg->_table_name;
-    my $type  = $pkg->_accessor_type($field);
+    my $self   = shift;
+    my $field  = shift;
+    my $id     = $self->id;
+    my $class  = ref $self;
+    my $table  = $class->_table;
+    my $id_col = $class->_id_col;
 
-    croak "Invalid object accessor: $pkg\::$field"
-        unless $type;
-    
-    if ( $type eq 'indirect' ) {
-        carp "$pkg\::$field is a read-only accessor" if @_;
-        return $TABLE_INFO{$field}{class}->search( $table => $id );
-    }
+    croak qq{Can't locate accessor "$field" via package "$class"}
+        unless exists $CLASS{$class}{accessors}{$field};
 
-    ## load-on-demand -- because the 'local' below autovivifies
-    ## maybe fixme -- don't load on demand if updating the value
-    
-    if ( not exists $OBJ_DATA{$pkg}{$id}{$field} ) {
-        $OBJ_DATA{$pkg}{$id}{$field} =
-            sql_do("select $field from $table where id=?", $id);
-    }
+    my $type   = $CLASS{$class}{accessors}{$field}{type};
+    my $ref    = $CLASS{$class}{accessors}{$field}{ref};
+    my $col    = $CLASS{$class}{accessors}{$field}{col};
+
+    return $TABLE_MAP{$ref}->search( $col => $id, @_ )
+        if $type eq 'indirect';
+
+    ## lazy-load columns now
+    $OBJ{$class}{$id}{$col} =
+            sql_do("select $col from $table where $id_col=?", $id)
+        if not exists $OBJ{$class}{$id}{$col};
 
     ## save some typing
-    use vars '$attr_value';
-    local *attr_value = \$OBJ_DATA{$pkg}{$self->id}{$field};
+    my $data = \$OBJ{$class}{$id}{$col};
 
     if ( $type eq 'direct' ) {
-
-        if (my $new = shift) {
-            my $ref_id = ref $new ? $new->id : $new;
-            
-            sql_do("update $table set $field=? where id=?", $ref_id, $id)
-                and $attr_value = $new;
+        if (@_) {
+            my $ref_id = ref $_[0] ? $_[0]->id : $_[0];
+            sql_do("update $table set $col=? where $id_col=?", $ref_id, $id)
+                and $$data = shift;
         }
 
-        ## inflate foreign key IDs into respective objects
-        $attr_value = $TABLE_INFO{$field}{class}->fetch($attr_value)
-            if exists $TABLE_INFO{$field}{class}
-            and not ref $attr_value;
+        ## inflate keys
+        $$data = $TABLE_MAP{$ref}->fetch( $$data ) unless ref $$data;
 
-    ## normal vanilla accessor
-    } else {
-    
-        if (my $new = shift) {
-            sql_do("update $table set $field=? where id=?", $new, $id)
-                and $attr_value = $new;
+    } elsif ( $type eq 'normal' ) {
+        if (@_) {
+            sql_do("update $table set $col=? where $id_col=?", $_[0], $id)
+                and $$data = shift;
         }
     }
 
-    return $attr_value;
+    return $$data;
 }
 
 
 sub delete {
-    my $self  = shift;
-    my $id    = $self->id;
-    my $pkg   = ref $self;
-    my $table = $pkg->_table_name;
+    my $self   = shift;
+    my $id     = $self->id;
+    my $class  = ref $self;
+    my $table  = $class->_table;
+    my $id_col = $class->_id_col;
     
-    sql_do("delete from $table where id=?", $id);
-    delete $OBJ_DATA{$pkg}{$id};
+    sql_do("delete from $table where $id_col=?", $id);
+    delete $OBJ{$class}{$id};
     
     ## fixme? cascade to remove *all* stub occurences from %OBJ_DATA
     ## (as in foreign key refs)
@@ -184,12 +193,11 @@ sub delete {
 
 use overload '""' => sub {
     my $self  = shift;
-    my $pkg   = ref $self;
-    my $table = $pkg->_table_name;
+    my $class   = ref $self;
 
-    return exists $TABLE_MAP{$table}{'name'}
+    return exists $CLASS{$class}{accessors}{'name'}
         ? $self->name
-        : $pkg . ":" . $self->id;
+        : $class . ":" . $self->id;
 };
 
 ###################################
@@ -198,28 +206,47 @@ use overload '""' => sub {
 
 sub dump {
     my ($self, @ignore) = @_;
-    my $pkg    = ref $self;
-    my $table  = $pkg->_table_name;
+    my $class  = ref $self;
+    my $table  = $class->_table;
     my %ignore = map { $_ => 1 } @ignore;
+    my @fields = grep { not $ignore{  $CLASS{$class}{accessors}{$_}{ref}  } }
+                 keys %{ $CLASS{$class}{accessors} };
 
-    my @fields = grep { not $ignore{$_} } $pkg->_fields;
     push @ignore, $table;
 
     my %h = map {
-        my $type   = $pkg->_accessor_type($_);
-        my @result = $self->$_;
-        my $value;
+        my $type   = $CLASS{$class}{accessors}{$_}{type};
+        my @result = $self->$_ unless $type eq 'alias';
+        my %values;
         
         if ($type eq 'indirect') {
-            $value = [ map { $_->dump(@ignore) } @result ];
+        
+            $values{$_} = [ map { $_->dump(@ignore) } @result ];
+            
         } elsif ($type eq 'direct') {
-            $value = $result[0] ? $result[0]->dump(@ignore) : undef;
-        } else {
-            $value = $result[0];
+            if ($result[0]) {
+                my $r = $result[0]->dump(@ignore);
+                my $prefix = $_;
+
+                %values = map {; "$prefix.$_" => $r->{$_} } keys %$r;
+                
+            } else {
+                $values{$_} = undef;
+            }
+
+        } elsif ($type eq 'normal') {
+            $values{$_} = $result[0];
         }
         
-        $_ => $value
+        %values;
+        
     } @fields;
+
+    $h{id} = $self->id;
+    
+#    $h{$_} = $h{ $CLASS{$class}{accessors}{$_}{ref} }
+#        for grep { $CLASS{$class}{accessors}{$_}{type} eq 'alias' }
+#            keys %{ $CLASS{$class}{accessors} };
 
     return \%h;
 }
@@ -228,112 +255,143 @@ sub dump {
 ## private class methods ##
 ###########################
 
-sub _preload_columns {
-    my $pkg   = shift;
-    my $table = $pkg->_table_name;
-    
-    $CLASS_INFO{$pkg}{preload_columns} ||= [
-        grep { $TABLE_MAP{$table}{$_} !~ /blob|text/ }
-        keys %{ $TABLE_MAP{$table} }
-    ];
-    
-    return @{ $CLASS_INFO{$pkg}{preload_columns} };
+sub _mk_stub {
+    my ($class, $id) = @_;
+    $CLASS{$class}{stub_count}{$id}++;
+    bless \$id, $class;
 }
 
-sub _stub {
-    my ($pkg, $id) = @_;
-    $STUB_COUNT{$pkg}{$id}++;
-    bless \$id, $pkg;
-}
-
-sub _table_name {
-    $CLASS_INFO{ $_[0] }{table};
-}
+sub _table     { $CLASS{ $_[0] }{table}; }
+sub _load_cols { @{ $CLASS{ $_[0] }{load_cols} }; }
+sub _id_col    { $CLASS{ $_[0] }{id_col}; }
+sub _accessors { keys %{ $CLASS{ $_[0] }{accessors} }; }
+sub _order_by  { $CLASS{ $_[0] }{order_by} ||= $_[0]->_id_col; }
 
 sub _fill_stubs {
-    my $pkg = shift;
+    my $class  = shift;
+    my $id_col = $class->_id_col;
+    my $table  = $class->_table;
     
-    my @empty_stub_ids = grep { not exists $OBJ_DATA{$pkg}{$_} }
+    my @empty_stub_ids = grep { not exists $OBJ{$class}{$_} }
                          map  { $_->id } @_;
 
     return unless @empty_stub_ids;                         
                       
-    my $sql = sprintf( "select id%s from %s where id in (%s)",
-                  join( "" => map { ",$_" } $pkg->_preload_columns ),
-                  $pkg->_table_name,
-                  join( "," => ("?") x @empty_stub_ids )
-              );
+    my $sql = sprintf "select %s from $table where $id_col in (%s)",
+                  join( "," => $id_col, $class->_load_cols ),
+                  join( "," => ("?") x @empty_stub_ids );
               
     my $q = sql_query($sql, @empty_stub_ids);
     while ( my $hr = $q->fetchrow_hashref ) {
-        $OBJ_DATA{$pkg}{ $hr->{id} } = { %$hr };
+        $OBJ{$class}{ $hr->{$id_col} } = { %$hr };
     }
-    $q->finish;    
+    $q->finish;
 }
 
-sub _fields {
-    my $pkg   = shift;
-    my $table = $pkg->_table_name;
-    return ('id',
-            keys %{ $TABLE_MAP{$table} },
-            grep { exists $TABLE_MAP{$_}{$table} } keys %TABLE_MAP);
-}
-
-sub _accessor_type {
-    my ($pkg, $field) = @_;
-    my $table = $pkg->_table_name;
-    
-    return 'indirect'
-        if exists $TABLE_MAP{$field} and exists $TABLE_MAP{$field}{$table};
-    return 'direct'
-        if exists $TABLE_MAP{$field};
-    return 'plain'
-        if exists $TABLE_MAP{$table}{$field}
-        or $field eq 'id';
-    return undef;
-}
 
 ##################
 ## private subs ##
 ##################
 
 sub _parse_tables {
-    my $q_table = sql_query("show tables");
-	while ( my ($table, $view) = $q_table->fetchrow_array ) {
-	
-		my $q_column = sql_query("describe $table");
-		while ( my $hr = $q_column->fetchrow_hashref ) {
-			my $col  = $hr->{Field};
-			my $type = $hr->{Type};
-			
-			next if $col eq 'id';
-			
-			$TABLE_MAP{$table}{$col}        = $type;
-			$TABLE_INFO{$table}{order_by} ||= $col;
-		}
-		$q_column->finish;
+    my @tables;
+    
+    my $q = sql_query("show tables");
+    while ( my ($table) = $q->fetchrow_array ) {
+        my $class             = _table_to_package_name($table);
+        $TABLE_MAP{$table}    = $class;
+        $CLASS{$class}{table} = $table;
+        
+        _generate_package($class);
+        push @tables, $table;
+    }
+    $q->finish;
 
-        my $pkg = _table_to_package_name($table);
-        $TABLE_INFO{$table}{class} = $pkg;
-        $CLASS_INFO{$pkg}{table}   = $table;
+    for my $table (@tables) {
+        my $class = $TABLE_MAP{$table};
+
+        $q = sql_query("describe $table");
+        while ( my $hr = $q->fetchrow_hashref ) {
+            my $col = $hr->{Field};
+            my ($field, $type, $ref) = _accessor_type($table, $col);
+			
+			$CLASS{$class}{id_col} = $col, next if $type eq 'id';
+            
+            $CLASS{$class}{accessors}{$field} = {
+                col  => $col,
+                type => $type,
+                ref  => $ref,
+            };
+
+            ## reverse-map the direct foreign keys
+            if ($type eq 'direct') {
+                my $ref_class = $TABLE_MAP{$ref};
+                $CLASS{$ref_class}{accessors}{$table} = {
+                    col  => $field,
+                    type => 'indirect',
+                    ref  => $table
+                };
+            }
+
+            push @{ $CLASS{$class}{load_cols} }, $col
+                if $hr->{Type} !~ /blob|text/;
+                
+            $CLASS{$class}{order_by}   ||= $col;
+        }
+        $q->finish;
         
-        _generate_package($pkg);
-        
-	}
-	$q_table->finish;
+    }
+
 }
 
-sub _generate_package {
-    my $pkg = shift;
-    no strict 'refs';
+#####
+
+sub _accessor_type {
+    my ($table, $name) = @_;
+
+    my $type = 'normal';
+    my $ref  = '';
     
-    @{ $pkg . '::ISA' } = ( __PACKAGE__ );
+    if ($name =~ s/_id$//) {
+        if ($name eq $table) {
+            $name = $type = 'id';
+        } elsif (PL_N($name) eq $table) {
+            $name = $type = 'id';
+        } elsif (exists $TABLE_MAP{$name}) {
+            $type = 'direct';
+            $ref  = $name;
+        } elsif ( exists $TABLE_MAP{ PL_N($name) } ) {
+            $type = 'direct';
+            $ref  = PL_N($name);
+        }
+    } elsif ($name eq 'id') {
+        $type = 'id';
+    } elsif (exists $TABLE_MAP{$name}) {
+        $type = 'direct';
+        $ref  = $name;
+    } elsif (exists $TABLE_MAP{ PL_N($name) }) {
+        $type = 'direct';
+        $ref  = PL_N($name);
+    }
+
+    ## $name is the name of the accessor METHOD
+    ## $ref  is the name of the table in a direct accessor
+
+    return ($name, $type, $ref);
 }
 
 sub _table_to_package_name {
     my $table = lc shift;
     $table =~ s/(?:^|_)(.)/uc $1/ge;
     return $table;
+}
+
+sub _generate_package {
+    my $class = shift;
+    no strict 'refs';
+    
+    unshift @{ "$class\::ISA" }, __PACKAGE__
+        unless UNIVERSAL::isa( $class, __PACKAGE__);
 }
 
 ######################################
@@ -343,32 +401,39 @@ sub _table_to_package_name {
 sub sql_query {
     confess "No DBH supplied" unless $DBH;
     my $sql = shift;
-	my $sth = $DBH->prepare_cached($sql) or confess $DBH::errstr;
+	my $sth;
 
-	eval {
-		$sth->execute(@_) or die $sth->errstr;
-	};
+    eval {
+        ## why won't putting these attribs in prepare_cached($sql, { ... })
+        ## work correctly??
+        
+        local $DBH->{RaiseError} = 1;
+        local $DBH->{PrintError} = 0;
+        
+        print "$sql\n" if $SQL_DEBUG;
+        $SQL_QUERIES++;
+        
+        $sth = $DBH->prepare_cached($sql);
+        $sth->execute(@_);
+        1;
+    } or return undef;
 
-	if ($@) {
-		confess $@; return undef;
-	}
-
-	return $sth;
+    return $sth;
 }
 
 sub sql_insertid {
-	return $DBH->{'mysql_insertid'};
+    return $DBH->{'mysql_insertid'};
 }
 
 sub sql_do {
-	my $sth = sql_query(@_) || return undef;
+    my $sth = sql_query(@_) or return undef;
 
-	my @ret = $_[0] =~ /^\s*select/i 
+    my @ret = $_[0] =~ /^\s*select/i 
         ? $sth->fetchrow_array
         : (1);
-	$sth->finish;
+    $sth->finish;
 
-	return wantarray ? @ret : $ret[0];
+    return wantarray ? @ret : $ret[0];
 }
 
 
@@ -380,222 +445,369 @@ __END__
 
 =head1 NAME
 
-Class::Tables - Relational-object interface with no configuration necessary
+Class::Tables - Auto-vivification of persistent classes, based on RDBMS schema
 
 =head1 SYNOPSIS
 
-The I<only> thing you need to do is give it a database handle to look at, 
-and it Just Works, right out of the box, provided your database follows some
-very basic rules:
-  
+Telling your relational object persistence class about all your table
+relationships is no fun. Wouldn't it be nice to just include a few lines in a
+program:
+
   use Class::Tables;
-  Class::Tables->dbh( DBI->connect($dsn, $user, $passwd) );
-  ## that's all you have to do to get this:
-  
-  my $new_guy = Employee->new( name => "Bilbo Baggins" );
-  my $old_guy = Employee->fetch( $id );
-  my $john    = Employee->search( name => "John Doe" );
-  
-  $john->name( "Jonathan Doe" );     ## simple accessors/mutators
-  print $john->age, $/;
-  
-  print "Stringification to the object's 'name' attribute: $john\n";
-  
-  my $dept = $john->department;      ## because we also have a table named
-  print $dept->description, $/;      ## "department", it returns an object
-  
-  $john->department( $other_dept );  ## assign a Department object
-  $john->department( 15 );           ##  .. or just the ID of one
-  
-  my @coworkers = $dept->employee;   ## get all Employee objects that
-                                     ## reference this Department
-                                     
-                                     ## this is also equivalent:
-  my @coworkers = Employee->search( department => $dept );
+  Class::Tables->dbh($dbh);
 
-=head1 DESCRIPTION
+and magically have all the object persistence classes from the database,
+preconfigured, with table relations auto-detected, etc?
 
-The goal of this module is not an all-encompassing object abstraction for
-relational data. If you want that, see L<Class::DBI> or L<Alzabo> and the
-like. Instead, Class::Tables aims to be a zero-configuration object
-abstraction. Using simple rules about the metadata -- the names of tables,
-columns, and their types -- Class::Tables automatically generates
-appropriate classes, with object relationships intact. These rules are
-so simple that you may find you are already following them.
+This is the goal of Class::Tables. Its aim is not to be an all-encompassing 
+tool like L<Class::DBI|Class::DBI>, but to handle the most common and useful
+cases smartly, quickly, and without needing your help. Just pass in a database
+handle, and this module will read your mind (by way of your database's table
+schema) in terms of relational object persistence. The very simple (and
+flexible) rules it uses to determine your object relationships from your
+database's schema are so simple, you will probably find that you are already
+following them.
 
-=head2 Meta-Data
+=head2 Introductory Example
+
+Suppose your database schema were as unweildy as the following SQL. The
+incosistent naming, the plural table names and singular column names are not
+a problem for Class::Tables.
+
+  create table departments (
+      id            int not null primary key auto_increment,
+      name          varchar(50) not null
+  );
+  create table employees (
+      employee_id   int not null primary key auto_increment,
+      name          varchar(50) not null,
+      salary        int not null,
+      department_id int not null
+  );
+
+To use Class::Tables, you need to do no more than this:
+
+  use Class::Tables;
+  $dbh = DBI->connect($dsn, $user, $passwd) or die;
+  Class::Tables->dbh($dbh);
+
+Et voila! Class::Tables looks at your table schema and generates two classes,
+C<Departments> and C<Employees>, each with constructor and search class
+methods:
+
+  my $marketing = Departments->new( name => "Marketing" );
+  my @underpaid = Employees->search( salary => 20_000 );
+  my $self      = Employees->fetch($my_id);
+
+It also generates the following instance methods:
 
 =over
 
-=item Primary Key
+=item A deletion method for both classes
 
-All tables must have an C<id> column, which is the primary key of the table,
-and set to C<AUTO_INCREMENT>.
+This simply removes the object from the database.
 
-=item Foreign Key Inflating
+  $marketing->delete;
 
-A column that shares a name with a table is treated as a foreign key
-reference to items of that table.
+=item Readonly id accessor methods for both classes
 
-If the C<employee> table has a column called C<department>, and there
-is a table in the database also named C<department>, then the
-C<department> accessor for Employee objects will return the I<object>
-referred to by the ID in that column. The mutator will also accept
-an appropriate object (or ID).
+For C<Departments> objects, this corresponds to the C<id> column in the table,
+and for C<Employees> objects, this corresponds to the C<employee_id> column.
+Class::Tables is smart enough to figure this out, even though "employee" is
+singular and "employees" is plural (See L<Plural And Singular Nouns>).
 
-Conversely, an C<employee> accessor (read-only) would be available to
-all Department objects that returns all Employee objects referencing
-the Department object in question.
+  print "You're not just a name, you're a number: " . $self->id;
 
-=item Lazy Loading
+=item Normal accessor/mutator methods
 
-All C<*blob> and C<*text> columns will be lazy-loaded: not queried
-or stored into memory until requested.
+C<Departments> objects get a C<name> accessor/mutator method, and C<Employees>
+objects get C<name> and C<salary> accessor/mutator methods, referring to the
+respective columns in the database.
 
-=item Automatic Sort Order
+  $self->salary(int rand 100_000);
+  print "Pass go, collect " . $self->salary . " dollars";
 
-The first column in the table which is not the C<id> column is the
-default sort order. All result sets returning multiple objects from
-a table will be sorted in this order (ascending).
+=item Foreign key methods
 
-=item Stringification
+When Class::Tables sees the C<department_id> column in the C<employees> table,
+it knows that there is also a C<departments> table, so it treats this column
+as a foreign key. Thus, C<Employees> objects get a C<department>
+accessor/mutator method, which returns (and can be set to) a C<Departments>
+object.
 
-If the table has a C<name> column, then its value will be used as
-the stringification value of an object. Otherwise, the object will
-stringify to C<CLASS:ID>.
+  print "I'd rather be in marketing than " . $self->department->name;
+  $self->department($marketing);
 
-=item Class Names
+It also reverses the foreign key relationship, so that all C<Departments>
+objects have a readonly C<employees> method, which returns a list of all
+C<Employees> objects referencing the particular C<Departments> object.
 
-Each table must be associated with a package. The default package
-name for a table in C<underscore_separated> style is the
-corresponding name translated to C<StudlyCaps>. However, foreign-key
-accessors are still named according to the column name. So calling
-C<$obj-E<gt>foo_widget> returns a C<FooWidget> object.
+  my @overpaid  = $marketing->employees;
+  ## same as:     Employees->search( department => $marketing )
+  
+  my @coworkers = $self->department->employees;
+
+Notice how the plural vs. singular names of the methods match their return
+values. This is all automatic! (See L<Plural And Singular Nouns>)
 
 =back
 
+=head1 USAGE
 
-=head1 INTERFACE
+Class::Tables offers more functionality than just the methods in this example.
+
+=head2 Database Metadata
+
+Here's a more concrete explanation of how Class::Tables will use your table
+schema to generate the persistent classes.
+
+=over
+
+=item Class Names
+
+Each table in the database must be associated with a class. The table name
+will be converted from C<underscore_separated> style into C<StudlyCaps> for
+the name of the class/package. 
+
+=item Primary Key
+
+All tables must have a primary key column in the database, which is an integer
+column set to C<AUTO_INCREMENT>. This column must be named either C<id>, the
+table name followed by an C<_id> suffix, or the singular form of the table
+name followed by an C<_id> suffix.
+
+In our above example, the C<employees> table could have had a primary key
+column named C<employee_id>, C<employees_id>, or C<id>. The flexibility allows
+for reasonable choices whether you name your tables as singular or plural
+nouns. (See L<Plural And Singular Nouns>)
+
+For simplicity and transparency, the associated object accessor is always
+named C<id>, regardless of the underlying column name.
+
+=item Foreign Key Inflating
+
+If a column has the same name as another table, that column is treated as a
+foreign key reference to that table. Alternately, the column may be the
+singular form of the table name, and an optional C<_id> suffix may be added.
+The name of the accessor is the name of the column, minus the C<_id>.
+
+In our above example, the foreign key column relating each employee with a
+department could have been named C<departments>, C<departments_id>,
+C<department>, or C<department_id>. Again, the flexibility allows for a
+meaningful column name whether your table names are singular or plural. (See
+L<Plural And Singular Nouns>).
+
+The foreign key relationship is also reversed as described in the example. The
+name of the accessor in the opposite direction is the name of the table. In
+our example, this means that objects of the C<Departments> class get an
+accessor named C<employees>. For this reason, it is often convenient to name
+the tables as plural nouns.
+
+=item Lazy Loading
+
+All C<*blob> and C<*text> columns will be lazy-loaded: not loaded from the
+database until their values are requested or changed. 
+
+=item Automatic Sort Order
+
+The first column in the table which is not the primary key is the default
+sort order for the class. All operations that return a list of objects will be
+sorted in this order (ascending). In our above example, both tables are sorted
+on C<name>.
+
+=item Stringification
+
+If the table has a C<name> column, then any objects of that type will
+stringify to the value of C<< $obj->name >>. Otherwise, the object will
+stringify to C<CLASS:ID>.
+
+=back
+
 
 =head2 Public Interface
 
 =over
 
-=item C<Class::Tables-E<gt>dbh( $dbh )>
+=item C<< Class::Tables->dbh($dbh) >>
 
-You must pass Class::Tables an active database handle before you can
-use any generated object classes.
-
-=back
-
-=head2 Data Class Methods
-
-Every class that Class::Tables generates gets the following class methods:
-
-=over
-
-=item C<SomeClass-E<gt>new( [ field =E<gt> value, ... ] )>
-
-Creates a new object in the database with the given values set. If
-successful, returns the object, otherwise returns undef. You can pass
-an object or an ID as the value if the field is a foreign key.
-
-=item C<SomeClass-E<gt>search( [ field =E<gt> value, ... ] )>
-
-Searches the appropriate table for objects matching the given restrictions.
-In list context, returns all objects that matched (or an empty list if no
-objects matched). In scalar context returns only the first object returned
-by the query (or undef if no objects matched). The scalar context query is
-slightly optimized. If no arguments are passed to C<search>, every object in
-the class is returned. 
-
-=item C<SomeClass-E<gt>fetch( $id )>
-
-Semantically equivalent to C<SomeClass-E<gt>search( id =E<gt> $id )>, but
-slightly optimized internally. Unlike C<search>, will never return multiple
-items. Returns undef if no object with the given ID exists in the database.
+You must pass Class::Tables an active database handle before you can use any
+generated object classes. 
 
 =back
 
-=head2 Object Methods
+=head2 Object Instance Methods
 
 Every object in a Class::Tables-generated class has the following methods:
 
 =over
 
-=item C<$obj-E<gt>delete()>
+=item C<< $obj->id >>
 
-Removes the object from the database.
+This readonly accessor returns the primary key of the object.
 
-=item Accessor/Mutators: C<$obj-E<gt>I<foo>( [ $new_val ] )>
+=item C<< $obj->delete >>
 
-For each column I<foo> in the table, an accessor/mutator is provided by
-the same name. It returns the current value of that column for the object.
-If I<foo> is also the name of another table in the database, then the
-accessor will return the corresponding Foo object with that ID, or undef
-if there is no such object. You may pass either a Foo object or an integer
-ID as the new value,
+Removes the object from the database. The behavior of further method calls on
+the object are undefined.
 
-Alternately, I<foo> can also be the name of a table that has a foreign key
-pointing to objects of the same type as C<$obj>. If C<$obj> is a Bar object,
-C<$obj-E<gt>foo> is exactly equivalent to C<Foo-E<gt>search( bar =E<gt> $obj )>.
+=item C<< $obj->attrib >> and C<< $obj->attrib($new_val) >>
 
-=item C<$obj-E<gt>field( $field [, $new_val ] )>
+For normal columns in the table (that is, columns not determined to be a
+foreign key reference), accessor/mutator methods are provided to get and
+set the value of the column, depending if an argument is given.
 
-This is an alternative syntax to accessors/mutators. If you aren't a fan
-of variable method names, you can use the C<field> method:
+For foreign key reference columns, calling the method as an accessor is
+equivalent to a C<fetch> (see below) on the appropriate class, so will return
+the referent object or C<undef> if there is no such object. When called as a
+mutator, the argument may be either an ID or an appropriate object.
 
-  for my $thing (qw/name age favorite_color/) {
-      ## these two are equivalent:
-      print $obj->$thing, $/;
-      print $obj->field($thing), $/;
-  }
+For the reverse-mapped foreign key references, the method is readonly, and
+returns a list of objects. It is equivalent to a C<search> (see below) on the
+appropriate class, which means you can also pass additional constraints:
 
-=item C<$obj-E<gt>dump>
+  my @volunteers = $marketing->employees( salary => 0 );
 
-Returns a hashref containing the object's attribute data. Recursively
-inflates foreign keys, too. Reverse foreign keys are mapped to an array ref.
-You may find this useful with HTML::Template! Use Data::Dumper on this to
-see how it does things...
+=item C<< $obj->field($field) >> and C<< $obj->field($field, $new_val) >>
+
+This is an alternative syntax to accessors/mutators. When C<$field> is the
+name of a valid accessor/mutator method for the object, this is equivalent to
+saying C<< $obj->$field >> and C<< $obj->$field($new_val) >>.
+
+=item C<< $obj->dump >>
+
+Returns a hashref containing the object's attribute data. It recursively
+inflates foreign keys and maps reverse foreign keys to an array reference.
+This is particularly useful for generating structures to pass to
+L<HTML::Template|HTML::Template> and friends. I suggest you use L<Data::Dumper|Data::Dumper>
+on the output of this method to see exactly how it is structured.
 
 =back
 
-=head1 OTHER STUFF
+=head2 Data Class Methods
 
-You can still override/augment object methods if you need to with SUPER:
+Every persistent object class that Class::Tables generates gets the following
+class methods:
 
-  package Employee;
+=over
+
+=item C<< Class->new( field1 => $value1, field2 => $value2, ... ) >>
+
+Creates a new object in the database with the given attributes set. If
+successful, returns the object, otherwise returns C<undef>. This is
+semantically equivalent to the following:
+
+  my $obj = Class->new;
+  $obj->field1($value1);
+  $obj->field2($value2);
+  ...
+
+So the values passed may be actual objects where applicable (for foreign
+keys).
+
+=item C<< Class->search( field1 => $value1, field2 => $value2, ... ) >>
+
+Searches the appropriate table for objects matching the given restrictions.
+In list context, returns all objects that matched (or an empty list if no
+objects matched). In scalar context returns only the first object returned
+by the query (or C<undef> if no objects matched). The scalar context query is
+slightly optimized to return only one object.
+
+As above, the passed values may be objects where applicable (for foreign
+keys). If no arguments are passed to C<search>, every object in the class is
+returned.
+
+=item C<< Class->fetch($id) >>
+
+Semantically equivalent to C<< Class->search( id => $id ) >>, but
+slightly optimized internally. Unlike C<search>, will never return multiple
+items. Returns C<undef> if no object with the given ID exists in the database.
+
+=back
+
+=head2 Notes On Persistent Classes
+
+Objects in these persistent classes are implemented as lightweight blessed
+scalars in an inside-out mechanism. This has some benefits, mainly that
+concurrency across identical objects is preserved:
+
+  my $bob1 = Employees->fetch(10);
+  my $bob2 = Employees->fetch(10);
+  
+  ## now $bob1 and $bob2 may not be the same physical object, but...
+  
+  $bob1->name("Bob");
+  $bob2->name("Robert");
+  
+  print $bob1->name, $bob2->name;
+  
+  ## will print "Robert" twice
+
+You can still override/augment object methods if you need to with C<SUPER::>
+
+  ## dumb example
+  
+  package Employees;
   sub ssn {
       my $self = shift;
       my $ssn = $self->SUPER::ssn(@_);
-      $ssn =~ s/(\d{3})(\d{2})(\d{4})/$1-$2-$3/;
+      $ssn =~ s/(\d\d\d)(\d\d)(\d\d\d\d)/$1-$2-$3/;
       return $ssn;
   }
 
-But since the objects are blessed scalars, you have to use some sort of
-inside-out mechanism to store extra (non-persistent) subclass attributes
-with the objects:
+But since these objects are implemented as blessed scalars, you have to use
+some sort of inside-out mechanism to store extra (non-persistent) subclass
+attributes with the objects:
 
-  ## if you want to do something like this:
-  
-  for my $emp ( grep { not $_->seen_already } @employees ) {
-     ## do something to $emp that you only want to do once..
-     ## maybe give $emp a raise?
-     
-     $emp->see;
+  package Employees;
+  my %flag;
+  sub flag {
+      my $self = shift;
+      @_ ? $flag{$self} = shift
+         : $flag{$self};
   }
-  
-  ## in the subclass, you can do this:
-  
-  package Employee;
-  my %seen;
-  sub seen_already { $seen{+shift};   }
-  sub see          { $seen{+shift}++; }
+
+=head2 Plural And Singular Nouns
+
+Class::Tables makes strong use of L<Lingua::EN::Inflect|Lingua::EN::Inflect>
+to convert between singular and plural, in an effort to make accessor names
+more meaningful and allow a wide range of column-naming schemes. So when this
+documentation talks about plural and singular nouns, it does not just mean
+"adding an S at the end." You zooligists may have a C<mice> table with primary
+key column properly detected as C<mouse_id>! Goose, geese, child, children,
+etc. The only limitations are what L<Lingua::EN::Inflect|Lingua::EN::Inflect>
+doesn't know about.
+
+I recommend naming tables with a plural noun, as this will make the accessor
+names much more meaningful.
+
+If L<Lingua::EN::Inflect|Lingua::EN::Inflect> is not available on your system,
+Class::Tables will still work fine, but without the distinction between
+plurals and singulars. Thus a primary key column can be named only C<id> or
+the name of the table with an C<_id> suffix. Similar statments are true for
+foreign key columns, etc.
+
+You can manually disable the pluralization by setting
+C<$Class::Tables::PLURALIZE> to a false value before you generate the classes.
 
 =head1 CAVEATS
 
+=over
+
+=item *
+
 So far, the table parsing code only works with MySQL. Same with getting the
-ID of the last inserted object. Testers/patchers for other DBMS's welcome!
+ID of the last inserted object. Testers/patchers for other RDBMSs welcome!
+
+=item *
+
+Pluralization code is only for English at the moment, sorry.
+
+=item *
+
+All modifications to objects are instantaneous -- no asynchronous updates
+and/or rollbacks (yet?)
+
+=back
 
 =head1 AUTHOR
 

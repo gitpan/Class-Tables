@@ -5,7 +5,8 @@ use ExtUtils::MakeMaker;
 WriteMakefile(
                     NAME          => 'Class::Tables',
                     VERSION_FROM  => 'lib/Class/Tables.pm',
-                    PREREQ_PM     => { DBI => 0, Carp => 0, overload => 0 },
+                    PREREQ_PM     => { DBI => 0, Carp => 0, overload => 0,
+                                       Lingua::EN::Inflect => 0 },
     ($] >= 5.005 ? (ABSTRACT_FROM => 'lib/Class/Tables.pm',
                     AUTHOR        => 'Mike Rosulek <mike@mikero.com>')
                  : ()),
