@@ -1,0 +1,21 @@
+
+
+ADD SOME TESTS!!!
+
+allow aliasing for pluralizing reverse foreign keys (using Lingua::*??) :
+  instead of $department->employee, also allow $department->employees
+
+perhaps in scalar context, a reverse foreign key should return a special
+collection object that knows the IDs of all the objects.. that way we can
+"map" to do a many-to-many thing:
+  $album->tracks->song->name;
+although in this case, we may also want the info associated with the
+"track" table that's contained here:
+  print $_->track_num, $_->song->name for $album->tracks;
+so it might only prove useful when we have a relation (as in ER model) with
+no associated data... just a many-to-many mapping table. 
+
+of course for this, we'd need some naming scheme for many-to-many
+relationships! ;)
+  
+

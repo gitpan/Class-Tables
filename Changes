@@ -1,0 +1,16 @@
+Revision history for Perl extension Class::Tables.
+
+0.21	Wed Oct 15 2003
+	- First public release!
+	- Decided on a name! Class::Tables
+	- Small improvements, like manual ref counting on the stub
+	  objects.
+
+0.20	Complete rewrite, with a lot of new ideas. Inside-out objects
+	to avoid concurrency problems, cached statement handles, etc.
+	I posted an RFC on Perlmonks and got a fairly positive response
+	so decided to clean it up, find a name, and release it.
+
+0.01 -	A long long time ago, I wrote a little DB abstraction and called
+ 0.10	it MikeroDBI. I used it a lot. The actual code, however, was kinda
+	nasty.

@@ -1,0 +1,8 @@
+Changes
+MANIFEST
+Makefile.PL
+README
+TODO
+lib/Class/Tables.pm
+test.pl
+META.yml                                 Module meta-data (added by MakeMaker)
