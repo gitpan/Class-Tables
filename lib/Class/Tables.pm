@@ -3,11 +3,11 @@ package Class::Tables;
 use Carp;
 use strict;
 use warnings;
-use vars qw/$VERSION $DBH $SQL_DEBUG $PLURALIZE $SQL_QUERIES $CASCADE/;
+use vars qw/$VERSION $DBH $DB_DRIVER $SQL_DEBUG $INFLECT $SQL_QUERIES $CASCADE/;
 
-$VERSION   = "0.25";
-$PLURALIZE = 1;
-$CASCADE   = 1;
+$VERSION = "0.26";
+$INFLECT = 1;
+$CASCADE = 1;
 
 ## flyweight data
 
@@ -18,30 +18,27 @@ my ( %CLASS, %OBJ, %TABLE_MAP );
 ######################
 
 sub import {
-    my $class = shift;
-    for (@_) {
-        if (/^no_cascade$/) {
-            $CASCADE = 0;
-            next;
-        } elsif (/^cascade$/) {
-            $CASCADE = 1;
-            next;
-        } else {
-            croak "Unknown parameter for 'use $class' : $_\n";
-        }
-    }
+    my ($class, %args) = @_;
+    
+    $CASCADE = $args{cascade} if exists $args{cascade};
+    $INFLECT = $args{inflect} if exists $args{inflect};
 }
 
 sub dbh {
     my ($super, $dbh) = @_;
     croak "No DBH given" unless $dbh;
-    ($DBH, %CLASS, %OBJ, %TABLE_MAP) = $dbh;
+
+    ($DBH, $DB_DRIVER, %CLASS, %OBJ, %TABLE_MAP) =
+        ($dbh, "Class::Tables::$dbh->{Driver}{Name}");
+
+    eval "use $DB_DRIVER; 1;"
+        or croak "$dbh->{Driver}{Name} is an unsupported database driver";
 
     no strict qw/refs subs/;
     
-    *PL_N = ($PLURALIZE && eval "use Lingua::EN::Inflect; 1")
+    *PL_N = ($INFLECT && eval "use Lingua::EN::Inflect; 1")
         ? \&Lingua::EN::Inflect::PL_N
-        : sub { $_[0] };
+        : sub { $_[0] . "s" };
 
     $super->_parse_tables();
 }
@@ -82,18 +79,22 @@ sub search {
 
 sub new {
     my ($class, %params) = @_;
-    $params{id} = undef;
+    delete $params{id};
 
     my @fields = grep { exists $CLASS{$class}{accessors}{$_} } keys %params;
     my @binds  = map { UNIVERSAL::can($_, 'id') ? $_->id : $_ } @params{@fields};
     my @cols   = map { $CLASS{$class}{accessors}{$_}{col} } @fields;
 
     my $table  = $class->_table;
-    my $sql    = "insert into $table set " . join("," => map { "$_=?" } @cols);
+    my $sql    = sprintf "insert into $table (%s) values (%s)",
+                     join("," => @cols),
+                     join("," => ("?") x @cols);
                 
     sql_do($sql, @binds) or return undef;
     
-    my $id  = sql_insertid();
+    my $id  = $DB_DRIVER->insert_id($DBH)
+        or die "Couldn't get insert_id";
+    
     my $obj = $class->_mk_stub($id);
     @{ $OBJ{$class}{$id} }{@cols} = @binds;
     
@@ -265,6 +266,7 @@ sub _order_by  { $CLASS{ $_[0] }{order_by} ||= $_[0]->_id_col; }
 
 sub _mk_stub {
     my ($class, $id) = @_;
+    
     $CLASS{$class}{stub_count}{$id}++;
     return bless \$id, $class;
 }
@@ -290,26 +292,10 @@ sub _stubs {
         @{ $OBJ{$class}{$id} }{@cols} = @$row;
     }
 
-#    for (@{ $q->fetchall_arrayref }) {
-#        my $id = $_->[0];
-#        push @stubs, $class->_mk_stub($id);
-#        @{ $OBJ{$class}{$id} }{@cols} = @$_;
-#    }
-
-#    while (my $rows = $q->fetchall_arrayref(undef, $MAX_ROWS)) {
-#        for (@$rows) {
-#            my $id = $_->[0];
-#            push @stubs, $class->_mk_stub($id);
-#            
-#            @{ $OBJ{$class}{$id} }{@cols} = @$_;
-#        }
-#    }
-
     $q->finish;
     
     return wantarray ? @stubs : $stubs[0];
 }
-
 
 ##################
 ## private subs ##
@@ -317,12 +303,11 @@ sub _stubs {
 
 sub _parse_tables {
     my $super = shift;
-    my @tables;
-    
-    my $q = sql_query("show tables")
-        or die "Error listing tables";
-    while ( my ($table) = $q->fetchrow_array ) {
-        my $class             = _table_to_package_name($table);
+
+    my %map = %{ $DB_DRIVER->map_tables($DBH) };
+
+    for my $table (keys %map) {
+        my $class = _table_to_package_name($table);
         
         croak "Tables '$table' and '$CLASS{$class}{table}' both become "
             . "the '$class' class"
@@ -332,18 +317,31 @@ sub _parse_tables {
         $CLASS{$class}{table} = $table;
         
         $super->_generate_package($class);
-        push @tables, $table;
     }
-    $q->finish;
 
-    for my $table (@tables) {
+    for my $table (keys %map) {
         my $class = $TABLE_MAP{$table};
 
-        $q = sql_query("describe $table")
-            or die "Error describing table $table";
-        while ( my $hr = $q->fetchrow_hashref ) {
-            my $col = $hr->{Field};
+        for my $col ( @{ $map{$table}{col_order} } ) {
+        
+            my $col_type = $map{$table}{cols}{$col}{type};
+            my $primary = $map{$table}{cols}{$col}{primary};
+            
             my ($field, $type, $ref) = _accessor_type($table, $col);
+
+            if ($primary or $type eq "id") {
+                croak "Two primary key columns detected for the '$table' "
+                    . "table: '$CLASS{$class}{id_col}' and '$col'"
+                    if $CLASS{$class}{id_col};
+            
+                $CLASS{$class}{accessors}{"id"} = {
+                    col => $col,
+                    type => "id",
+                    ref => ""
+                };
+                $CLASS{$class}{id_col} = $col;
+                next;
+            }
             
             $CLASS{$class}{accessors}{$field} = {
                 col  => $col,
@@ -351,9 +349,7 @@ sub _parse_tables {
                 ref  => $ref,
             };
 
-            $CLASS{$class}{id_col} = $col, next if $type eq 'id';
-
-            ## reverse-map the direct foreign keys
+            ## reverse the foreign keys in the appropriate class
             if ($type eq 'direct') {
                 my $ref_class = $TABLE_MAP{$ref};
                 $CLASS{$ref_class}{accessors}{$table} = {
@@ -363,13 +359,14 @@ sub _parse_tables {
                 };
             }
 
+            $CLASS{$class}{order_by} = $col
+                unless exists $CLASS{$class}{order_by};
+            
             push @{ $CLASS{$class}{load_cols} }, $col
-                if $hr->{Type} !~ /blob|text/;
+                unless $col_type =~ /blob|text/;
                 
-            $CLASS{$class}{order_by} ||= $col;
         }
-        $q->finish;
-        
+
     }
 
 }
@@ -381,6 +378,21 @@ sub _accessor_type {
 
     my $type = 'normal';
     my $ref  = '';
+    
+    ## remove optional prefix of "tablename_" (accounting for singular/plural)
+    ## .. couldn't do this with one giant extended regex, because PL_N re-
+    ## invokes the regex engine.
+    
+    while ($name =~ /_/g) {
+        my $pre = substr($name, 0, pos($name) - 1);
+        my $post = substr($name, pos $name);
+        
+        if ($pre eq $table or PL_N($pre) eq $table) {
+            $name = $post;
+            last;
+        }
+    }
+    
     
     if ($name =~ s/_id$//) {
         if ($name eq $table) {
@@ -450,10 +462,6 @@ sub sql_query {
     return $sth;
 }
 
-sub sql_insertid {
-    return $DBH->{'mysql_insertid'};
-}
-
 sub sql_do {
     my $sth = sql_query(@_) or return undef;
 
@@ -499,19 +507,19 @@ following them.
 
 =head2 Introductory Example
 
-Suppose your database schema were as unweildy as the following SQL. The
+Suppose your database schema were as unweildy as the following MySQL. The
 incosistent naming, the plural table names and singular column names are not
 a problem for Class::Tables.
 
   create table departments (
-      id            int not null primary key auto_increment,
-      name          varchar(50) not null
+      id                int not null primary key auto_increment,
+      department_name   varchar(50) not null
   );
   create table employees (
-      employee_id   int not null primary key auto_increment,
-      name          varchar(50) not null,
-      salary        int not null,
-      department_id int not null
+      employee_id       int not null primary key auto_increment,
+      name              varchar(50) not null,
+      salary            int not null,
+      department_id     int not null
   );
 
 To use Class::Tables, you need to do no more than this:
@@ -552,7 +560,9 @@ singular and "employees" is plural (See L<Plural And Singular Nouns>).
 
 C<Departments> objects get a C<name> accessor/mutator method, and C<Employees>
 objects get C<name> and C<salary> accessor/mutator methods, referring to the
-respective columns in the database.
+respective columns in the database. Note that the C<department_> prefix is
+automatically removed from the C<department_name> column because the name of
+the table is C<departments>.
 
   $self->salary(int rand 100_000);
   print "Pass go, collect " . $self->salary . " dollars";
@@ -601,30 +611,42 @@ the name of the class/package.
 
 =item Primary Key
 
-All tables must have a primary key column in the database, which is an integer
-column set to C<AUTO_INCREMENT>. This column must be named either C<id>, the
-table name followed by an C<_id> suffix, or the singular form of the table
-name followed by an C<_id> suffix.
+All tables must have a integer single-column primary key. By default,
+Class::Tables will use the primary key from the table definition. If no
+column is explicitly listed as the primary key, it will try to find one by
+name: valid names are C<id> or the table name (plus or minus pluralization)
+followed by an C<_id> suffix.
 
-In our above example, the C<employees> table could have had a primary key
-column named C<employee_id>, C<employees_id>, or C<id>. The flexibility allows
-for reasonable choices whether you name your tables as singular or plural
-nouns. (See L<Plural And Singular Nouns>)
+In our above example, if the C<primary key> keyword was omitted from the
+C<employees> table definition, Class::Tables would have looked for columns
+named C<employee_id>, C<employees_id>, or C<id> as the primary key. The
+flexibility allows for reasonable choices whether you name your tables as
+singular or plural nouns. (See L<Plural And Singular Nouns>)
 
-For simplicity and transparency, the associated object accessor is always
-named C<id>, regardless of the underlying column name.
+Note: For simplicity and transparency, the associated object accessor is
+always named C<id>, regardless of the underlying column name.
+
+In MySQL, the primary key column must be set to C<AUTO_INCREMENT>. In SQLite,
+the primary key may be an auto increment column (in SQLite this is only
+possible if the column is the first column in the table and declared as
+C<integer primary key>) using the same naming conventions as above.
+Alternatively, you may omit an explicit primary key column and Class::Tables
+will use the hidden C<ROWID> column.
 
 =item Foreign Key Inflating
 
-If a column has the same name as another table, that column is treated as a
-foreign key reference to that table. Alternately, the column may be the
-singular form of the table name, and an optional C<_id> suffix may be added.
-The name of the accessor is the name of the column, minus the C<_id>.
+If a column has the same name as another table (plus or minus pluralization),
+that column is treated as a foreign key reference to that table. The column
+name may also have an optional C<_id> suffix and C<tablename_> prefix, where
+C<tablename> is the name of the current table (plus or minus pluralization).
+The name of the accessor is the name of the column, without the optional
+prefix and suffix.
 
 In our above example, the foreign key column relating each employee with a
-department could have been named C<departments>, C<departments_id>,
-C<department>, or C<department_id>. Again, the flexibility allows for a
-meaningful column name whether your table names are singular or plural. (See
+department could have been anything matching 
+C</^(employees?_)?(departments?)(_id)?$/>, with the accessor being named the
+value of $2 in that expression. Again, the flexibility allows for a meaningful
+column name whether your table names are singular or plural. (See
 L<Plural And Singular Nouns>).
 
 The foreign key relationship is also reversed as described in the example. The
@@ -658,12 +680,19 @@ stringify to C<CLASS:ID>.
 
 =over
 
-=item C<< use Class::Tables $option >>
+=item C<< use Class::Tables %args >>
 
-C<$option> may be either C<'no_cascade'> or C<'cascade'> to disable and
-enable cascading deletes, respectively. See C<delete> below. The default
-is to enable cascading deletes. If you need to change cascading delete
-behavior on the fly, set C<$Class::Tables::CASCADE>.
+Valid argument keys are C<'cascade'> and C<'inflect'>, to control cascading
+deletes and use of L<Lingua::EN::Inflect|Lingua::EN::Inflect> for plural &
+singular nouns, respectively. Use a boolean value to enable or disable the
+feature. The default behavior is:
+
+  use Class::Tables cascade => 1, inflect => 1;
+
+See L<Plural And Singular Nouns> for more information on noun pluralization.
+
+See C<delete> below for information on cascading deletes. If you need to
+change cascading delete behavior on the fly, set C<$Class::Tables::CASCADE>.
 
 =item C<< Class::Tables->dbh($dbh) >>
 
@@ -730,7 +759,11 @@ appropriate class, which means you can also pass additional constraints:
 
   my @volunteers = $marketing->employees( salary => 0 );
   ## same as Employees->search( department => $marketing, salary => 0 );
-  
+
+For I<all> columns in the table C<tablename>, the column name will have any
+C<tablename_> prefix removed in the name of the accessor (plus or minus
+pluralization). So in the Employees table, the column name is effectively
+treated with C<s/^employees?_//> before consideration.
 
 =item C<< $obj->field($field) >> and C<< $obj->field($field, $new_val) >>
 
@@ -811,8 +844,8 @@ equivalent to the following:
 So for foreign key attributes, you may pass an actual object or an ID:
 
   ## both are ok:
-  Employee->new( department => $marketing );
-  Employee->new( department => 10 );
+  my $e = Employees->new( department => $marketing );
+  my $e = Employees->new( department => 10 );
 
 =item C<< Class->search( field1 => $value1, field2 => $value2, ... ) >>
 
@@ -881,31 +914,79 @@ attributes with the objects:
       @_ ? $foo{ $self->id } = shift
          : $foo{ $self->id };
   }
+  sub DESTROY {
+      my $self = shift;
+      delete $foo{ $self->id };
+      $self->SUPER::DESTROY;
+  }
+
+=head2 Subclassing/wrapping Class::Tables
+
+You may find it necessary to subclass Class::Tables. One example I can think
+of is to implement a security wrapper. This is pretty simple. You can simply
+add wrappers to the C<new>, C<fetch>, and C<search> methods as necessary. For
+a really hairbrained example, say that we want to restrict certain users of
+our application to objects with I<odd-numbered IDs only>:
+
+  package MySubclass;
+  use base 'Class::Tables';
+  
+  sub fetch {
+      my ($pkg, $id) = @_;
+
+      warn("Odd numbers only!") and return
+          unless privileged( get_current_user() ) or $id % 2;
+
+      $pkg->SUPER::fetch($id);
+  }
+
+  sub search {
+      my $pkg = shift;
+      my @results = $pkg->SUPER::search(@_);
+
+      ## something similarly appropriate if the current user is
+      ## unprivileged, perhaps along the lines of:
+      ##     grep { $_->id % 2 } @results
+      ## or raising warnings, etc.
+  }
+
+To use this subclass, simply change these two lines in the application code
+and the persistence classes will be created beneath C<MySubclass> instead of
+beneath Class::Tables:
+
+  ## use Class::Tables;
+  ## Class::Tables->dbh($dbh);
+  use MySubclass;
+  MySubclass->dbh($dbh);
+
+  ## this will now raise a warning if privileges not met
+  my $obj = Employees->fetch(10);
+
+
 
 =head2 Plural And Singular Nouns
 
 Class::Tables makes strong use of L<Lingua::EN::Inflect|Lingua::EN::Inflect>
 to convert between singular and plural, in an effort to make accessor names
 more meaningful and allow a wide range of column-naming schemes. So when this
-documentation talks about plural and singular nouns, it does not just mean
+documentation says "plus or minus pluralization", it does not just consider
 "adding an S at the end." You zoologists may have a C<mice> table with a
 corresponding primary/foreign key named C<mouse_id>! Goose to geese, child to
 children, etc. The only limitations are what
 L<Lingua::EN::Inflect|Lingua::EN::Inflect> doesn't know about.
 
 I recommend naming tables with a plural noun and foreign key columns with a
-singular noun (optionally with the "_id" suffix). This combination makes the
+singular noun (optionally with the C<_id> suffix). This combination makes the
 accessor names much more meaningful, and is (to my knowledge) the most common
 relational naming convention.
 
 If L<Lingua::EN::Inflect|Lingua::EN::Inflect> is not available on your system,
-Class::Tables will still work fine, but without the distinction between
-plurals and singulars. Thus a primary key column can be named only C<id> or
-the name of the table with an C<_id> suffix. Similar statments are true for
-foreign key columns, etc.
+Class::Tables will still work fine, but using a very naive singular-to-plural
+conversion algorithm ("adding an S at the end").
 
-You can manually disable the pluralization by setting
-C<$Class::Tables::PLURALIZE> to a false value before you generate the classes.
+You can manually disable using L<Lingua::EN::Inflect|Lingua::EN::Inflect> with
+
+  use Class::Tables inflect => 0;
 
 =head1 CAVEATS
 
@@ -913,8 +994,10 @@ C<$Class::Tables::PLURALIZE> to a false value before you generate the classes.
 
 =item *
 
-So far, the table parsing code only works with MySQL. Same with getting the
-ID of the last inserted object. Testers/patchers for other RDBMSs welcome!
+Supported database drivers are MySQL and SQLite. With SQLite, you can only
+get an auto-incremented ID column if it is the first column in the table, and
+if it is declared as C<integer primary key>. Class::Tables doesn't (yet)
+support the hidden C<rowid> column in SQLite.
 
 =item *
 
@@ -924,6 +1007,12 @@ Pluralization code is only for English at the moment, sorry.
 
 All modifications to objects are instantaneous -- no asynchronous updates
 and/or rollbacks (yet?)
+
+=item *
+
+Only one database handle is used at a time. Calling C<< Class::Tables->dbh >>
+a second time will produce undefined results. The parameters used in the
+C<use Class::Tables> line are global.
 
 =back
 
@@ -937,4 +1026,3 @@ free to contact me with comments, questions, patches, or whatever.
 Copyright (c) 2003 Mike Rosulek. All rights reserved. This module is free 
 software; you can redistribute it and/or modify it under the same terms as Perl 
 itself.
-

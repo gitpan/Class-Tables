@@ -1,16 +1,22 @@
 #!/usr/bin/perl
 
 use strict;
-# use warnings;
 use Test::More;
 use DBI;
-use Data::Dumper;
+
+# use warnings;
+# use Data::Dumper;
 
 # $Class::Tables::SQL_DEBUG++;
 
 ############################
 ## get DB connection info ##
 ############################
+
+my %drivers = (
+    mysql  => "show tables",
+    SQLite => "select name from sqlite_master where type='table'"
+);
 
 use lib 'testconfig';
 my $Config;
@@ -28,48 +34,56 @@ my $dbh = DBI->connect( @$Config{qw/dsn user password/} );
 if (not $dbh) {
     plan skip_all => "Couldn't connect to the database for testing.\n"
                    . "Run `perl Makefile.PL -s` to configure the test DB.";
-} elsif ($dbh->{Driver}->{Name} ne "mysql") {
+                   
+} elsif ( ! $drivers{ $dbh->{Driver}{Name} } ) {
     $dbh->disconnect;
-    plan skip_all => "A MySQL database is required for Class::Tables";
+    plan skip_all => "Your database driver is not supported. (supported: "
+                   . join(" " => sort keys %drivers) . ")";
+
 } else {
-    plan tests => 44;
+    plan tests => 46;
 }
 
-my $q = $dbh->prepare("show tables");
+## clear all tables first
+
+my $q = $dbh->prepare( $drivers{ $dbh->{Driver}{Name} } );
 $q->execute;
 while ( my ($table) = $q->fetchrow_array ) {
     $dbh->do("drop table $table");
 }
 $q->finish;
 
+## insert test data
+
 $dbh->do($_) for (split /\s*;\s*/, <<'END_OF_SQL');
     create table departments (
-        id            int not null primary key auto_increment,
-        name          varchar(50) not null
+        id              integer primary key /*! not null auto_increment */,
+        department_name varchar(50) not null
     );
     create table employees (
-        employee_id   int not null primary key auto_increment,
-        name          varchar(50) not null unique,
-        department_id int not null,
-        photo         longblob
+        id              integer primary key /*! not null auto_increment */,
+        employee_name   varchar(50) not null unique,
+        department_id   integer,
+        photo           longblob
     );
     create table purchases (
-        id            int not null primary key auto_increment,
-        product_id    int not null,
-        employee_id   int not null,
-        quantity      int not null,
-        date          date
+        id              integer primary key /*! not null auto_increment */,
+        product_id      integer not null,
+        employee_id     integer not null,
+        quantity        integer not null,
+        date            date
     );
     create table products (
-        id            int not null primary key auto_increment,
-        name          varchar(50) not null,
-        weight        int not null,
-        price         decimal
+        id              integer primary key /*! not null auto_increment */,
+        name            varchar(50) not null,
+        weight          integer not null,
+        price           decimal
     );
     insert into departments values (1,'Hobbiton Division');
     insert into departments values (2,'Bree Division');
     insert into departments values (3,'Buckland Division');
     insert into departments values (4,'Michel Delving Division');
+    
     insert into employees   values (1,'Frodo Baggins',3,'');
     insert into employees   values (2,'Bilbo Baggins',3,'');
     insert into employees   values (3,'Samwise Gamgee',3,'');
@@ -81,10 +95,12 @@ $dbh->do($_) for (split /\s*;\s*/, <<'END_OF_SQL');
     insert into employees   values (9,'Will Whitfoot',4,'');
     insert into employees   values (10,'Bandobras Took',1,'');
     insert into employees   values (11,'Folco Boffin',1,'');
+    
     insert into products    values (1,'Southfarthing Pipeweed',10,200);
     insert into products    values (2,'Prancing Pony Ale',150,300);
     insert into products    values (3,'Farmer Cotton Mushrooms',200,150);
     insert into products    values (4,'Green Dragon Ale',150,350);
+    
     insert into purchases   values (1,2,6,6,'2002-12-10');
     insert into purchases   values (2,4,3,1,'2002-12-10');
     insert into purchases   values (3,1,2,20,'2002-12-09');
@@ -105,15 +121,27 @@ END_OF_SQL
 my $timer = times;
 
 use_ok('Class::Tables');
-Class::Tables->dbh($dbh);
 
-#print Dumper \%Class::Tables::CLASS;
+{
+    package MySubclass;
+    our @ISA = ('Class::Tables');
+    our $hello;
+    sub search {
+        my $x = shift;
+        $hello++;
+        $x->SUPER::search(@_);
+    }
+}
+
+MySubclass->dbh($dbh);
+
+## subclassing
 
 for (qw/Departments Employees Products Purchases/) {
     no strict 'refs';
     is_deeply(
         \@{"$_\::ISA"},
-        ['Class::Tables'],
+        ['MySubclass'],
         "$_ class created" );
 }
 
@@ -266,6 +294,9 @@ isa_ok(
     "Employees",
     "new return value" );
 
+ok( defined $new->id,
+    "got insert ID for new object" );
+
 is( $new->name,
     "Grima Wormtongue",
     "new creates object with initial info" );
@@ -334,21 +365,29 @@ is( scalar Employees->search,
     undef,
     "delete all in a table" );
 
-# print Class::Tables->as_class_dbi("App");
+## subclassing
+
+isnt(
+    $MySubclass::hello,
+    0,
+    "subclass overrides methods" );
+
+## done!
 
 $timer = times - $timer;
 ok( 1,
-    "summary: $Class::Tables::SQL_QUERIES queries, ${timer}s" );
+    "summary: $Class::Tables::SQL_QUERIES queries, ${timer}s "
+  . "(using $dbh->{Driver}{Name})" );
 
-## done!
+## cleanup
 
 END {
     if ($dbh) {
         $dbh->do($_) for (split /\s*;\s*/, <<'        END_OF_SQL');
-            drop table if exists departments;
-            drop table if exists employees;
-            drop table if exists products;
-            drop table if exists purchases
+            drop table /*! if exists */ departments;
+            drop table /*! if exists */ employees;
+            drop table /*! if exists */ products;
+            drop table /*! if exists */ purchases
         END_OF_SQL
 
         $dbh->disconnect;

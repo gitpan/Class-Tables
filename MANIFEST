@@ -4,5 +4,7 @@ Makefile.PL
 README
 TODO
 lib/Class/Tables.pm
+lib/Class/Tables/mysql.pm
+lib/Class/Tables/SQLite.pm
 test.pl
 META.yml                                 Module meta-data (added by MakeMaker)

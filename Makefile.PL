@@ -3,8 +3,8 @@ use ExtUtils::MakeMaker;
 use DBI;
 use Data::Dumper;
 
-unless (grep /mysql/, DBI->available_drivers) {
-    die "Class::Tables requires DBD::mysql at this time";
+unless (grep { /^(mysql|SQLite)$/ } DBI->available_drivers) {
+    die "Class::Tables requires DBD::mysql or DBD::SQLite at this time";
 }
 
 use lib 'testconfig';
@@ -26,8 +26,8 @@ if (defined $Config->{dsn} and not $ARGV[0] =~ /^-s(etup)?$/) {
 
     print qq[
         I need to connect to a database to run the test suite. Please
-        supply the connection information for a MySQL database I can use
-        for testing.
+        supply the connection information for a MySQL or SQLite database
+        that I can use for testing.
 
         WARNING: All existing tables in this database will be deleted!
         
@@ -74,9 +74,8 @@ WriteMakefile(
     PREREQ_PM     => { DBI => 0,
                        Carp => 0,
                        overload => 0,
-                       "Lingua::EN::Inflect" => 0,
-                       "DBD::mysql" => 0 },
-    clean         => { FILES => "testConfig" },
+                       "Lingua::EN::Inflect" => 0 },
+    clean         => { FILES => "testconfig" },
     ABSTRACT_FROM => 'lib/Class/Tables.pm',
     AUTHOR        => 'Mike Rosulek <mike@mikero.com>',
 );

@@ -1,5 +1,13 @@
 Revision history for Perl extension Class::Tables.
 
+0.26	Thu Jan 22 2004
+	- Added POD section about subclassing.
+	- Optional "tablename_" prefix for any column (idea from Ron Savage).
+	- Added support for SQLite, including first attempt to factor out
+	  driver-specific stuff.
+	- Changed interface for enabling/disabling Lingua::EN::Inflect stuff
+	  and cascading deletes.
+
 0.25	Sun Jan 12 2004
 	- Test suite bugfixes.
 	- Workaround for bizarro behavior with DBI::fetchall_arrayref.

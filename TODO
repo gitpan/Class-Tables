@@ -2,13 +2,6 @@ Forgive the format (or lack thereof) of this file, as it's mostly a
 stream-of-consciousness hodge-podge of random ideas.
 
 
-
-TEST SUITE
-
-Find out if test suite gets the DSN info in the "correct" way. Could it
-come from Makefile.PL instead?
-
-
 MANY-TO-MANY
 
 In a many-to-many mapping table, the additional primary key column
