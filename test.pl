@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 
-use constant NUM_TESTS => 74;
+use constant NUM_TESTS => 79;
 
 use strict;
 use Test::More;
@@ -54,6 +54,7 @@ my $dbh = eval {
 };
 
 if (not $dbh) {
+    diag $DBI::errstr;
     plan skip_all => "Couldn't connect to the database for testing. Run `perl "
                    . "Makefile.PL -s` to reconfigure the connection parameters "
 		   . "for the test database.";
@@ -158,7 +159,7 @@ $dbh->do($_) for (split /\s*;\s*/, <<"END_OF_SQL");
     insert into products (name,weight,price)
         values ('Farmer Cotton Mushrooms',200,150);
     insert into products (name,weight,price)
-        values ('Green Dragon Ale',150,350);
+        values ('Green Dragon Ale',175,350);
     
     insert into purchases
         (purchase_product,purchase_employee_id,purchase_quantity,purchases_date)
@@ -189,7 +190,10 @@ $dbh->do($_) for (split /\s*;\s*/, <<"END_OF_SQL");
         values (2,6,11,'2002-12-08');
     insert into purchases
         (purchase_product,purchase_employee_id,purchase_quantity,purchases_date)
-        values (3,2,8,'2002-12-14')
+        values (3,2,8,'2002-12-14');
+    insert into purchases
+        (purchase_product,purchase_employee_id,purchase_quantity,purchases_date)
+        values (3,1,15,'2002-12-24');
 
 END_OF_SQL
 
@@ -267,6 +271,20 @@ is_deeply(
 is( join(":" => sort { $emps[$a]->name cmp $emps[$b]->name } 0 .. $#emps),
     join(":" => 0 .. $#emps),
     "search results sorted" );
+
+is( join(":" => map { $_->id }
+                sort { $a->weight <=> $b->weight } Products->search),
+    join(":" => map { $_->id } Products->search( -order => "weight" )),
+    "search results sorted with -order arg" );
+
+is( join(":" => map { $_->id }
+                sort { $b->price <=> $a->price } Products->search),
+    join(":" => map { $_->id } Products->search( -order => "-price" )),
+    "search results sorted with -order arg (descending)" );
+
+is( scalar(() = Employees->search(-limit => 2)),
+    2,
+    "search results with -limit arg" );
 
 is( scalar Employees->search(name => "asdfasdfasdf"),
     undef,
@@ -356,12 +374,13 @@ ok( $field_ok,
 ## n-to-n accessors:
 
 {
-    my @long_way  = map { $_->product } Employees->fetch(1)->purchases;
+    my @long_way  = values %{{ map { $_->product->id => $_->product }
+                               Employees->fetch(1)->purchases }};
     my @short_way = Employees->fetch(1)->products;
     
     is_deeply(
-        [ map { $_->id } @long_way ],
-        [ map { $_->id } @short_way ],
+        [ sort map { $_->id } @long_way ],
+        [ sort map { $_->id } @short_way ],
         "n-to-n accessors" );
 }
 
@@ -497,7 +516,19 @@ isa_ok(
 
 is( $dump->{purchases}[0]{'product.name'},
     ($h->purchases)[0]->product->name,
-    "dump output indirect foreign keys inflated" );
+    "dump output indirect foreign keys recursively inflated" );
+
+isa_ok(
+    $dump->{products},
+    "ARRAY",
+    "dump output n-to-n foreign key" );
+
+is( $dump->{products}[0]{'name'},
+    ($h->products)[0]->name,
+    "dump output n-to-n foreign keys recursively inflated" );
+
+# use Data::Dumper;
+# print Dumper $dump;
 
 ######################
 ## deleting objects ##

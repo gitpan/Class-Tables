@@ -6,13 +6,13 @@ use strict;
 use warnings;
 use vars qw/$VERSION $DBH $DB_DRIVER $SQL_DEBUG $INFLECT $SQL_QUERIES $CASCADE/;
 
-$VERSION = "0.29_1";
+$VERSION = "0.29_2";
 $INFLECT = 1;
 $CASCADE = 1;
 
 ## flyweight data
 
-my ( %CLASS, %OBJ, %TABLE_MAP, $SCHEMA_CACHE );
+my ( %CLASS, %OBJ, %TABLE_MAP, $SCHEMA_CACHE, $NAMESPACE );
 
 ######################
 ## public interface ##
@@ -21,9 +21,11 @@ my ( %CLASS, %OBJ, %TABLE_MAP, $SCHEMA_CACHE );
 sub import {
     my ($class, %args) = @_;
     
-    $CASCADE      = $args{cascade} if exists $args{cascade};
-    $INFLECT      = $args{inflect} if exists $args{inflect};
-    $SCHEMA_CACHE = $args{cache}   if exists $args{cache};
+    $CASCADE      = $args{cascade}   if exists $args{cascade};
+    $INFLECT      = $args{inflect}   if exists $args{inflect};
+    $SCHEMA_CACHE = $args{cache}     if exists $args{cache};
+    $NAMESPACE    = $args{namespace} if exists $args{namespace};
+
 }
 
 sub dbh {
@@ -77,8 +79,24 @@ sub search {
                       my $col = $CLASS{$class}{accessors}{$_}{col};
                       defined $params{$_} ? "$col=?" : "$col is null"
                  } @fields;
-    $sql      .= " order by " . $class->_order_by;
-    $sql      .= " limit 1" unless wantarray;
+
+    my $sort = $class->_order_by;
+    
+    if ($params{-order}) {
+        my $s   = $params{-order};
+        my $dir = $s =~ s/^-// ? "desc" : "asc";
+        if (exists $CLASS{$class}{accessors}{$s}) {
+            $sort = "$CLASS{$class}{accessors}{$s}{col} $dir";
+        }
+    }
+    
+    $sql .= " order by $sort";
+    
+    if (defined $params{-limit}) {
+        $sql .= sprintf " limit %d", $params{-limit};
+    } else {
+        $sql .= " limit 1" unless wantarray;
+    }
     
     return $class->_get_objs($sql, @binds);
 }
@@ -167,24 +185,27 @@ sub _n_to_n_accessor {
     my $class  = ref $self;
     my $table  = $class->_table;
 
+    ## $ref is the destination table
+    ## $inter is the many-many mapping table
     my $ref    = $CLASS{$class}{accessors}{$field}{ref};
+    my $inter  = $CLASS{$class}{accessors}{$field}{intermed};
+    
+    ## col is the col in $inter which points to me
+    ## col2 is the col in $inter which points to $ref
     my $col    = $CLASS{$class}{accessors}{$field}{col};
     my $col2   = $CLASS{$class}{accessors}{$field}{col2};
     
-    ## col is the col in $ref which points to me
-    ## col2 is the col in $ref which points to $field
-    
+    my $i_class  = $TABLE_MAP{$inter};
     my $r_class  = $TABLE_MAP{$ref};
-    my $f_class  = $TABLE_MAP{$field};
-    my $f_id_col = $f_class->_id_col;
-    my @cols     = ($f_id_col, $f_class->_load_cols);
+    my $r_id_col = $r_class->_id_col;
+    my @cols     = ($r_id_col, $r_class->_load_cols);
 
-    my $sql = sprintf "select %s from $field as f, $ref as r where "
-                    . "r.$col2 = f.$f_id_col and r.$col = ? order by r.%s",
-                  join("," => map { "f.$_ as $_" } @cols),
+    my $sql = sprintf "select distinct %s from $inter as i, $ref as r where "
+                    . "i.$col2 = r.$r_id_col and i.$col = ? order by r.%s",
+                  join("," => map { "r.$_ as $_" } @cols),
                   $r_class->_order_by;
     
-    return $f_class->_get_objs($sql, $self->id);
+    return $r_class->_get_objs($sql, $self->id);
 }
 
 sub _1_to_n_accessor {
@@ -308,7 +329,10 @@ sub dump {
         my @result = $self->$_;
         my %values;
         
-        if ($type eq '1-to-n') {
+        if ($type eq '1-to-n' or $type eq 'n-to-n') {
+
+            push @ignore, $CLASS{$class}{accessors}{$_}{intermed}
+                if $type eq 'n-to-n';
         
             $values{$_} = [ map { $_->dump(@ignore) } @result ];
             
@@ -492,10 +516,11 @@ sub _parse_tables {
                 my $dest_class = $TABLE_MAP{ $dest_table };
                 
                 $CLASS{$src_class}{accessors}{$dest_table} = {
-                    col  => $src_col,
-                    col2 => $dest_col,
-                    ref  => $table,
-                    type => "n-to-n"
+                    col      => $src_col,
+                    col2     => $dest_col,
+                    ref      => $dest_table,
+                    intermed => $table,
+                    type     => "n-to-n"
                 };
             }
         }
@@ -553,7 +578,9 @@ sub _col_type {
 }
 
 sub _table_to_package_name {
-    return join "" => map ucfirst, split /_/, lc shift;
+    my $class = join "" => map ucfirst, split /_/, lc shift;
+    $class = "$NAMESPACE\::$class" if defined $NAMESPACE;
+    return $class;
 }
 
 sub _generate_subclass {
@@ -745,7 +772,9 @@ schema to generate the persistent classes.
 
 Each table in the database must be associated with a class. The table name
 will be converted from C<underscore_separated> style into C<StudlyCaps> for
-the name of the class/package. 
+the name of the class/package. If you have specified a C<namespace> option
+in the module's C<use> statement, this will be prefixed to the package name
+(along with a double-colon, of course).
 
 =item Primary Key
 
@@ -850,11 +879,19 @@ file to force a re-mapping.
 
 You can omit this arg or pass a false value to disable this feature.
 
+=item namespace
+
+Takes a string which will be the prefix namespace of all the classes generated
+by Class::Tables. For instance, setting C<namespace> to C<MyApp> will result in
+the C<employees> table being assigned to the C<MyApp::Employees> package, etc.
+If set to C<undef>, the generated classes go in the top-level namespace.
+
 =back
 
-The default behavior is:
+The default behavior for all the C<use> arguments is:
 
-  use Class::Tables cascade => 1, inflect => 1, cache => undef;
+  use Class::Tables cascade => 1, inflect => 1, cache => undef,
+                    namespace => undef;
 
 
 =item C<< Class::Tables->dbh($dbh) >>
@@ -899,6 +936,7 @@ automatically deleted. If you want this behavior, you must add it yourself
 in the Employees::delete method.
 
 =item C<< $obj->attrib >>
+
 =item C<< $obj->attrib($new_val) >>
 
 For normal columns in the table (that is, columns not determined to be a
@@ -941,6 +979,7 @@ pluralization). So in the Employees table, the column name is effectively
 treated with C<s/^employees?_//> before consideration.
 
 =item C<< $obj->field($field) >>
+
 =item C<< $obj->field($field, $new_val) >>
 
 This is an alternative syntax to accessors/mutators. When C<$field> is the
@@ -1047,6 +1086,15 @@ underlying column.
 As usual, for foreign key attributes, you may pass an actual object or an ID.
 If no arguments are passed to C<search>, every object in the class is
 returned.
+
+The C<search> method also takes optional C<-limit> and C<-order> arguments. The
+C<-limit> option takes a number, which is the number of records returned. The
+C<-order> option takes the name of an accessor (not the name of the underlying
+column -- to preserve database transparency) on which to order the results (in
+ascending order). If the name is prefixed with a minus sign, the results are
+sorted in descending order.
+
+  my ($best1, $best2) = Employees->search( -limit => 2, -order => "-salary" );
 
 =item C<< Class->fetch($id) >>
 
@@ -1213,6 +1261,9 @@ free to contact me with comments, questions, patches, or whatever.
 
 Initial many-to-many relationship support by Matt Diephouse
 E<lt>matt@diephouse.comE<gt>.
+
+Other input & suggestions from Ron Savage, Jeff Anderson, and Rick Measham
+gratiously acknowledged.
 
 =head1 COPYRIGHT
 

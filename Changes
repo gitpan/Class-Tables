@@ -1,9 +1,11 @@
 Revision history for Perl extension Class::Tables.
 
-0.29	Fri Jul 23 2004
+0.29	Thu Feb 24 2005
 	- Bug fixed in search() and new(), when 1-to-many accessor name used
 	- Bug fixed in Storable serialization
-	- Initial n-to-n support
+	- Initial n-to-n support (muchas gracias a Matt Diephouse)
+	- "-order" and "-limit" args to search
+	- namespace option in use statement (idea from Rick Measham)
 
 0.28	Thu Jul 15 2004
 	- Use diag() in test.pl instead of print

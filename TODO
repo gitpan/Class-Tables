@@ -1,6 +1,17 @@
 Forgive the format (or lack thereof) of this file, as it's mostly a
 stream-of-consciousness hodge-podge of random ideas.
 
+
+NAMESPACE
+
+  use Class::Tables namespace => "MyApp";
+  ...
+  for ( MyApp::Employees->search ) {
+    ...
+  }
+  my $d = MyApp::Departments->fetch(5);
+
+
 MISC
 
 Return dummy object on failure (a la DBIx::Simple) so that
