@@ -1,6 +1,6 @@
 Revision history for Perl extension Class::Tables.
 
-0.25_1	Sun Jan 11 2004
+0.25	Sun Jan 12 2004
 	- Test suite bugfixes.
 	- Workaround for bizarro behavior with DBI::fetchall_arrayref.
 

@@ -43,7 +43,6 @@ while ( my ($table) = $q->fetchrow_array ) {
 $q->finish;
 
 $dbh->do($_) for (split /\s*;\s*/, <<'END_OF_SQL');
-
     create table departments (
         id            int not null primary key auto_increment,
         name          varchar(50) not null

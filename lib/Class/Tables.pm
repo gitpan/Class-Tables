@@ -5,7 +5,7 @@ use strict;
 use warnings;
 use vars qw/$VERSION $DBH $SQL_DEBUG $PLURALIZE $SQL_QUERIES $CASCADE/;
 
-$VERSION   = "0.25_1";
+$VERSION   = "0.25";
 $PLURALIZE = 1;
 $CASCADE   = 1;
 
@@ -40,7 +40,7 @@ sub dbh {
     no strict qw/refs subs/;
     
     *PL_N = ($PLURALIZE && eval "use Lingua::EN::Inflect; 1")
-        ? Lingua::EN::Inflect::PL_N
+        ? \&Lingua::EN::Inflect::PL_N
         : sub { $_[0] };
 
     $super->_parse_tables();
@@ -284,10 +284,10 @@ sub _stubs {
     
     $q->execute(@_);
 
-    while (my $rows = $q->fetchrow_arrayref) {
-        my $id = $rows->[0];
+    while (my $row = $q->fetchrow_arrayref) {
+        my $id = $row->[0];
         push @stubs, $class->_mk_stub($id);
-        @{ $OBJ{$class}{$id} }{@cols} = @$rows;
+        @{ $OBJ{$class}{$id} }{@cols} = @$row;
     }
 
 #    for (@{ $q->fetchall_arrayref }) {
@@ -323,6 +323,11 @@ sub _parse_tables {
         or die "Error listing tables";
     while ( my ($table) = $q->fetchrow_array ) {
         my $class             = _table_to_package_name($table);
+        
+        croak "Tables '$table' and '$CLASS{$class}{table}' both become "
+            . "the '$class' class"
+            if exists $CLASS{$class};
+        
         $TABLE_MAP{$table}    = $class;
         $CLASS{$class}{table} = $table;
         
@@ -406,6 +411,7 @@ sub _accessor_type {
 }
 
 sub _table_to_package_name {
+    return join "" => map ucfirst, split /_/, lc shift;
     my $table = lc shift;
     $table =~ s/(?:^|_)(.)/uc $1/ge;
     return $table;
